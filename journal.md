@@ -2131,3 +2131,40 @@ products, LLR, `kite time`) looped forever while the Fermat test's edge choice w
 proof tests hung at 100% CPU until killed (SIGKILL: the loop never reads the stop flag). Fixed
 before anything was committed; the suite now runs with `--timeout 1200`.
 999·2^4000000−1 at 270K on the M4 with `kite-prst` defaults: RES64 BBAD057C725281B3 (matches), 3267 s. Version 0.1.12.
+
+## 2026-10-18 20:10 — Three more of gwnum's techniques
+
+From `gwnum.h` (31.07) and PRST's use of it.
+
+**1. Careful first 30 squarings.** "At the start of a PRP exponentiation, the FFT data is
+decidedly not random, leading to much larger than expected roundoff errors. In my own PRP code,
+I call gwsquare_carefully for the first 30 iterations" (gwnum.h, `gwset_carefully_count`); PRST
+does it (`src/exp.cpp`). kite starts from x_0 = 3^k, a few thousand bits, so its first squarings
+are that case. `square_at` in `prp.c` squares the first 30 as (x+r)(x−r)+r², ~180 squarings'
+time out of millions. Known residues unchanged; 2007·2^432901−1 now runs at 28672 with 15
+careful redos.
+
+**2. FFT implementation chosen with every core busy.** gwnum benchmarks implementations per
+length and assumes "the user of your program will keep all cores fully occupied"
+(`gwset_bench_cores`). kite's shape (R × C) came from a formula and its stage order from
+single-core times. New `kite_opts.rows` / `--rows R` and a fourth tuning column. M4, 256K: alone
+512 × 256 is 5.6% faster than the default 256 × 512 (0.691 against 0.732 ms per squaring), but
+with 10 tests the default wins everywhere (6767·2^3322174−1: 1.39–1.41 against 1.40–1.42 ms; 240K
+1.34 against 1.41–1.42; 400K 2.63 against 2.81; 1024 rows 18–69% slower), so shapes stay as they
+are. Stage order under load, 10 tests, 0 1 2 3 3 2 1 0: at 240K order 0 1338.9, 1 1342.1, 2 1358.5,
+3 1354.2 µs (the table's order 1 is 0.2% off); at 400K 0 2702.7, 1 2700.1, 2 2666.5, 3 2661.1
+(the table's order 1 is 1.5% off). `kite tune --load N` now times the orders with N tests running;
+an M4 run over 144K–460K gives the orders for the built-in table there, the single-core times
+staying for the length choice (loaded times are in other units).
+
+**3. Sum check.** gwnum checks that the sum of a multiplication's outputs matches the product of
+its inputs' sums (`gw_test_illegal_sumout`), a hardware-error check per operation. kite's NEON
+inverse transform is unnormalised by 2L, so Σ outputs = 2L·(Σ inputs)² (measured ratio
+524288.0000000001 at 256K, 65536 at 32K; mismatch on correct squarings 1e-16 to 2e-16 of
+Σ|outputs|; the check fails above 1e-9). Sums are taken per pass-1 group while it is in L1, with
+NEON intrinsics (plain C does not vectorise: 20% on every squaring; intrinsics 5%). It runs on
+every 64th squaring (~0.2%, within noise) and a mismatch raises the round-off reading past the
+limit, so `kite_prp` redoes the squaring carefully, as PRST repeats a suspect operation. With the
+check on every squaring an injected fault is caught at the next squaring (sum_errors 1,
+gerbicz_errors 0, residue correct); at 1 in 64 Gerbicz catches it as before. `sum_errors` is
+reported per test, which a client could use to flag unreliable hardware. New ctest `sum_check`.

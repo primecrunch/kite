@@ -16,6 +16,7 @@
 #include "kernels.h"
 #include "threads.h"
 
+#include <arm_neon.h>
 #include <math.h>
 #include <stdio.h>
 #include <sys/sysctl.h>
@@ -127,6 +128,9 @@ typedef struct {
     double *scr[64];       // per-thread pass-2 scratch (C elements)
     double *carry[64];     // per-thread carries (R)
     double maxerr_t[64];
+    // sum check, per thread: inverse-FFT outputs (and their magnitudes) and new inputs
+    int sum_do_out, sum_do_in;
+    double sum_out_t[64], sum_abs_t[64], sum_in_t[64];
     double wrapq;
     // current job
     kite_ctx *ctx;
@@ -534,6 +538,16 @@ static int neon_init_impl(kite_ctx *ctx, int sme) {
     st->sme = sme;
     st->H = ctx->L / 2;
     if (choose_shape(st->H, &st->R, &st->C)) return -1;
+    if (ctx->rows && ctx->rows != st->R) {
+        // a tuned or requested shape, if it is one the kernels can run
+        uint32_t r = ctx->rows, c = st->H / r;
+        uint8_t tmp[32];
+        if (st->H % r == 0 && r % 4 == 0 && c % 8 == 0 && c >= 16 && factorize(r, tmp) >= 0 &&
+            factorize(c, tmp) >= 0) {
+            st->R = r;
+            st->C = c;
+        }
+    }
     uint32_t R = st->R, C = st->C, H = st->H;
     st->ngroups = C / G;
     if (ctx->L - ctx->top_t > 2 * G) return -1;
@@ -670,6 +684,10 @@ static int neon_init_impl(kite_ctx *ctx, int sme) {
         st->carry[t] = kite_alloc(R * sizeof(double));
     }
     st->pool = nth > 1 ? kite_pool_new(nth) : NULL;
+    // the inverse transform here is unnormalised by 2L (measured: 524288 at L = 262144, 65536 at
+    // 32768, constant to ~1e-12)
+    ctx->sum_scale = 2.0 * ctx->L;
+    ctx->sum_on = getenv("KITE_SUM") != NULL;  // kite_set_sum_check turns it on
     return 0;
 }
 
@@ -757,6 +775,30 @@ static void group_inv(neon_state *st, double *d, uint32_t g) {
 }
 
 // ---- pass 1 -----------------------------------------------------------------
+
+// Sum and magnitude of group g's 16 values per row, in four vector accumulators each (plain C
+// does not vectorise: without fast-math the additions stay in order).
+static void group_sum(const neon_state *st, const double *d, uint32_t g, double *sum, double *abs_sum) {
+    const char *base = (const char *)d + g * 128;
+    float64x2_t s0 = vdupq_n_f64(0), s1 = s0, s2 = s0, s3 = s0, a0 = s0, a1 = s0, a2 = s0, a3 = s0;
+    for (uint32_t r = 0; r < st->R; r++) {
+        const double *p = (const double *)(base + r * st->rowstride);
+        float64x2_t v0 = vld1q_f64(p), v1 = vld1q_f64(p + 2), v2 = vld1q_f64(p + 4), v3 = vld1q_f64(p + 6);
+        float64x2_t v4 = vld1q_f64(p + 8), v5 = vld1q_f64(p + 10), v6 = vld1q_f64(p + 12), v7 = vld1q_f64(p + 14);
+        s0 = vaddq_f64(s0, vaddq_f64(v0, v4));
+        s1 = vaddq_f64(s1, vaddq_f64(v1, v5));
+        s2 = vaddq_f64(s2, vaddq_f64(v2, v6));
+        s3 = vaddq_f64(s3, vaddq_f64(v3, v7));
+        if (abs_sum) {
+            a0 = vaddq_f64(a0, vaddq_f64(vabsq_f64(v0), vabsq_f64(v4)));
+            a1 = vaddq_f64(a1, vaddq_f64(vabsq_f64(v1), vabsq_f64(v5)));
+            a2 = vaddq_f64(a2, vaddq_f64(vabsq_f64(v2), vabsq_f64(v6)));
+            a3 = vaddq_f64(a3, vaddq_f64(vabsq_f64(v3), vabsq_f64(v7)));
+        }
+    }
+    *sum += vaddvq_f64(vaddq_f64(vaddq_f64(s0, s1), vaddq_f64(s2, s3)));
+    if (abs_sum) *abs_sum += vaddvq_f64(vaddq_f64(vaddq_f64(a0, a1), vaddq_f64(a2, a3)));
+}
 
 // mode 0: normal (carry in/out, reweight); 1: group 0 first visit (store
 // digits unweighted, carry-in 0); 2: group 0 final (input digits, absorb carry,
@@ -921,13 +963,16 @@ static void pass1_a(void *arg, int t, int n) {
     (void)n;
     int prof = prof_enabled();
     PROF_T(t);
+    st->sum_out_t[t] = st->sum_abs_t[t] = st->sum_in_t[t] = 0;
     group_inv(st, d, g0);
+    if (st->sum_do_out) group_sum(st, d, g0, &st->sum_out_t[t], &st->sum_abs_t[t]);
     PROF_MARK(t, PR_P1_INV);
     memset(carr, 0, R * sizeof(double));  // mode b takes its carry-in from the array
     norm_rows(ctx, st, d, carr, g0, 0, R, 1, &maxerr);
     PROF_MARK(t, PR_P1_NORM);
     for (uint32_t g = g0 + 1; g < g1; g++) {
         group_inv(st, d, g);
+        if (st->sum_do_out) group_sum(st, d, g, &st->sum_out_t[t], &st->sum_abs_t[t]);
         PROF_MARK(t, PR_P1_INV);
         if (g == NG - 1) {
             norm_rows(ctx, st, d, carr, g, 0, R - 2, 0, &maxerr);
@@ -937,6 +982,7 @@ static void pass1_a(void *arg, int t, int n) {
         } else {
             norm_rows(ctx, st, d, carr, g, 0, R, 0, &maxerr);
         }
+        if (st->sum_do_in) group_sum(st, d, g, &st->sum_in_t[t], NULL);
         PROF_MARK(t, PR_P1_NORM);
         group_fwd(st, d, g);
         PROF_MARK(t, PR_P1_FWD);
@@ -962,6 +1008,7 @@ static void pass1_b(void *arg, int t, int n) {
     int prof = prof_enabled();
     PROF_T(t);
     norm_rows(st->ctx, st, st->d, cin, g0, 0, R, 2, &maxerr);
+    if (st->sum_do_in) group_sum(st, st->d, g0, &st->sum_in_t[t], NULL);
     group_fwd(st, st->d, g0);
     PROF_MARK(t, PR_P1_B);
     if (t == 0 && prof) prof_ops++;
@@ -974,9 +1021,47 @@ static void pass1(kite_ctx *ctx, double *d) {
     st->d = d;
     kite_pool_run(st->pool, pass1_a, st);
     kite_pool_run(st->pool, pass1_b, st);
+    ctx->sum_out = ctx->sum_abs = 0;
+    double in = 0;
     for (int t = 0; t < st->nth; t++) {
         if (st->maxerr_t[t] > ctx->maxerr) ctx->maxerr = st->maxerr_t[t];
+        ctx->sum_out += st->sum_out_t[t];
+        ctx->sum_abs += st->sum_abs_t[t];
+        in += st->sum_in_t[t];
     }
+    if (st->sum_do_in) ctx->sum_in = in;
+}
+
+// Sum check around a squaring of x (gwnum's sum-of-inputs against sum-of-outputs): the inverse
+// FFT's outputs must sum to sum_scale * (sum of the inputs)^2, where the input sum was taken as
+// the previous squaring wrote x. A mismatch beyond rounding is a hardware or arithmetic error in
+// this squaring: it counts in sum_errors and raises the round-off reading past any limit, so a
+// caller that redoes over-limit operations (kite_prp) redoes it.
+#define SUM_EVERY 64
+static void sum_check_begin(kite_ctx *ctx, const kite_num *x, int *check) {
+    neon_state *st = ctx->bk;
+    // every SUM_EVERY-th squaring (KITE_SUM_EVERY overrides, for measurement)
+    static uint32_t e = 0;
+    if (!e) e = getenv("KITE_SUM_EVERY") ? (uint32_t)atoi(getenv("KITE_SUM_EVERY")) : SUM_EVERY;
+    st->sum_do_out = ctx->sum_on && ctx->op_count % e == 0;
+    st->sum_do_in = ctx->sum_on && (ctx->op_count + 1) % e == 0;
+    *check = st->sum_do_out && ctx->sum_x == x->d;
+}
+
+static void sum_check_end(kite_ctx *ctx, const kite_num *x, int check, double in_before) {
+    neon_state *st = ctx->bk;
+    if (check) {
+        double want = ctx->sum_scale * in_before * in_before;
+        if (getenv("KITE_DEBUG_SUM"))
+            fprintf(stderr, "sum: out %.17g in^2 %.17g ratio %.17g abs %.3g diff/abs %.3g\n",
+                    ctx->sum_out, in_before * in_before, ctx->sum_out / (in_before * in_before),
+                    ctx->sum_abs, fabs(ctx->sum_out - want) / ctx->sum_abs);
+        if (fabs(ctx->sum_out - want) > 1e-9 * ctx->sum_abs) {
+            ctx->sum_errors++;
+            ctx->maxerr = 1.0;
+        }
+    }
+    ctx->sum_x = st->sum_do_in ? x->d : NULL;
 }
 
 // ---- pass 2 -----------------------------------------------------------------
@@ -1196,15 +1281,22 @@ static void neon_to_digits(kite_ctx *ctx, const kite_num *x, int64_t *dig) {
 }
 
 static void neon_square(kite_ctx *ctx, kite_num *x) {
+    int check;
+    double in_before = ctx->sum_in;
+    sum_check_begin(ctx, x, &check);
     pass2(ctx, x->d, 0);
     pass1(ctx, x->d);
+    sum_check_end(ctx, x, check, in_before);
     ctx->op_count++;
 }
 
 static void neon_mul(kite_ctx *ctx, kite_num *x, const kite_num *y) {
+    neon_state *st = ctx->bk;
+    st->sum_do_out = st->sum_do_in = 0;
     prep_operand(ctx, y->d);
     pass2(ctx, x->d, 1);
     pass1(ctx, x->d);
+    ctx->sum_x = NULL;
     ctx->op_count++;
 }
 

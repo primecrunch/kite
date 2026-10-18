@@ -5,7 +5,7 @@
 //                                 [--block B] [--fault ITER] [--careful-limit N]
 //   kite time K N [--iters N]
 //   kite throughput K N [--configs 10x1,5x2,...] [--secs S]
-//   kite tune LMIN LMAX [--out FILE]
+//   kite tune LMIN LMAX [--out FILE] [--load N [--secs S]]
 // Common options: --backend ref|c2p|neon  --fft L  --threads T
 //
 // `prp` runs the library driver (Gerbicz-checked) and prints RES64, the low 64
@@ -143,12 +143,14 @@ int main(int argc, char **argv) {
     uint64_t iters = 1000;
     uint32_t base = 3;
     double secs = 3;
+    int load = 0;  // tune: tests running at once while timing (0 = one test alone)
     for (int i = 2 + used; i + 1 < argc; i += 2) {
         const char *a = argv[i], *v = argv[i + 1];
         if (!strcmp(a, "--backend")) o.backend = parse_backend(v);
         else if (!strcmp(a, "--fft")) o.fft_len = (uint32_t)atoi(v);
         else if (!strcmp(a, "--threads")) o.threads = (uint32_t)atoi(v);
         else if (!strcmp(a, "--order")) o.plan_order = 1 + (uint32_t)atoi(v);
+        else if (!strcmp(a, "--rows")) o.rows = (uint32_t)atoi(v);
         else if (!strcmp(a, "--iters")) iters = strtoull(v, 0, 10);
         else if (!strcmp(a, "--expect")) expect = v;
         else if (!strcmp(a, "--base")) base = (uint32_t)atoi(v);
@@ -162,6 +164,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--configs")) cfg = v;
         else if (!strcmp(a, "--secs")) secs = atof(v);
         else if (!strcmp(a, "--out")) out = v;
+        else if (!strcmp(a, "--load")) load = atoi(v);
         else {
             fprintf(stderr, "unknown option %s\n", a);
             return 2;
@@ -180,9 +183,9 @@ int main(int argc, char **argv) {
         }
         printf("%" PRIu64 "*2^%" PRIu64 "-1 is %s  RES64 %016" PRIX64
                "  FFT %u  %.1f s (%.1f us/iter)  maxerr %.4f  gerbicz_errors %u  fft_retries %u"
-               "  careful_ops %u%s\n",
+               "  careful_ops %u  sum_errors %u%s\n",
                k, n, r.is_prp ? "a probable prime!" : "composite", r.res64, r.fft_len, r.seconds,
-               r.seconds * 1e6 / n, r.maxerr, r.gerbicz_errors, r.roundoff_retries, r.careful_ops,
+               r.seconds * 1e6 / n, r.maxerr, r.gerbicz_errors, r.roundoff_retries, r.careful_ops, r.sum_errors,
                r.resumed ? "  (resumed)" : "");
         if (expect) {
             int ok = strtoull(expect, 0, 16) == r.res64;
@@ -278,6 +281,35 @@ int main(int argc, char **argv) {
         // each of the four stage orders, interleaved so that drift in machine
         // load hits them alike; record the fastest order with its time
         FILE *f = out ? fopen(out, "a") : NULL;
+        if (load > 0) {
+            // with `load` tests running at once (how primecrunch runs them), which order is
+            // fastest: alone and with every core busy can disagree (journal, 2026-10-18).
+            // Orders run 0 1 2 3 3 2 1 0 so drift hits them alike; us is per test per squaring.
+            for (uint32_t L = ((uint32_t)k + 63) / 64 * 64; L <= n; L += 64) {
+                kite_opts lo = o;
+                lo.fft_len = L;
+                lo.plan_order = 1;
+                kite_ctx *probe = kite_ctx_new(1, (uint64_t)L * 12, -1, &lo);
+                if (!probe) continue;
+                kite_ctx_free(probe);
+                double tot[4] = {0};
+                static const int seq[8] = {0, 1, 2, 3, 3, 2, 1, 0};
+                for (int r = 0; r < 8; r++) {
+                    lo.plan_order = 1 + seq[r];
+                    tot[seq[r]] += throughput(1, (uint64_t)L * 12, lo, load, 1, secs);
+                }
+                int bo = 0;
+                for (int ord = 1; ord < 4; ord++) {
+                    if (tot[ord] > tot[bo]) bo = ord;
+                }
+                double us = 2e6 * load / tot[bo];
+                printf("%u %.2f %d\n", L, us, bo);
+                if (f) fprintf(f, "%u %.2f %d\n", L, us, bo);
+                fflush(stdout);
+            }
+            if (f) fclose(f);
+            return 0;
+        }
         for (uint32_t L = ((uint32_t)k + 63) / 64 * 64; L <= n; L += 64) {
             kite_ctx *c[4] = {0};
             kite_num *x[4] = {0};

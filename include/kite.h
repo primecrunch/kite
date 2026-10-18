@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define KITE_VERSION "0.1.12"
+#define KITE_VERSION "0.1.13"
 
 typedef struct kite_ctx kite_ctx;
 typedef struct kite_num kite_num;
@@ -32,6 +32,9 @@ typedef struct {
     // FFT stage order: 0 = from the tuning file (default order if untuned),
     // else 1 + bits: bit 0 column radices ascending, bit 1 row radices ascending
     uint32_t plan_order;
+    // NEON backend: rows R of the four-step matrix (H = L/2 = R x C), 0 = from the tuning data,
+    // else choose_shape's balance of pass-1 group (R x 128 bytes) against pass-2 scratch (C x 32).
+    uint32_t rows;
     // 1 = choose the FFT length at the round-off limit (kite_fit_bpw) rather than with a margin:
     // for callers that recover from a high round-off one operation at a time, as kite_prp does.
     uint32_t edge;
@@ -63,6 +66,11 @@ double kite_max_roundoff(const kite_ctx *ctx);
 void kite_reset_roundoff(kite_ctx *ctx);
 // Check round-off on every `every`-th squaring/multiplication (default 1).
 void kite_set_roundoff_check(kite_ctx *ctx, uint32_t every);
+// Sum check (NEON backend): on every 64th squaring the sum of the inverse FFT's outputs is
+// compared with the square of the sum of its inputs, as gwnum does; a mismatch counts in
+// kite_sum_errors and raises kite_max_roundoff past any limit. Costs ~0.2% at 1 in 64.
+void kite_set_sum_check(kite_ctx *ctx, int on);
+uint32_t kite_sum_errors(const kite_ctx *ctx);
 
 // Fully reduce x into [0, N) as little-endian 64-bit limbs.
 // `limbs` must hold kite_limbs(ctx) words.
@@ -119,6 +127,7 @@ typedef struct {
     uint32_t gerbicz_errors;   // detected and recovered
     uint32_t roundoff_retries; // FFT length increases
     uint32_t careful_ops;      // operations redone carefully after a round-off over max_roundoff
+    uint32_t sum_errors;       // squarings whose output sum did not match (redone carefully)
     int resumed;               // started from a checkpoint
     uint64_t resumed_at;       // iteration it resumed from
     double seconds;

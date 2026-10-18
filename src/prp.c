@@ -324,6 +324,21 @@ static void careful_mul(prp_state *s, kite_num *x, const kite_num *a, const kite
 // million squarings at 64K 0.20 bits per word past the fit (2026-10-18).
 #define CAREFUL_COST_DIV 1100
 
+// The first squarings from x_0 = base^k (a number of a few thousand bits) work on data that is
+// far from random, with round-off well above what the FFT length was chosen for; gwnum's author
+// squares the first 30 carefully in his own PRP code, and PRST does (gwset_carefully_count).
+#define CAREFUL_START 30
+
+// x = x^2 for iteration i + 1 of the test: carefully for the first CAREFUL_START
+static void square_at(prp_state *s, kite_num *x, uint64_t i) {
+    if (i < CAREFUL_START) {
+        careful_square(s, x);
+        s->careful--;  // planned, not a redo
+    } else {
+        kite_square(s->ctx, x);
+    }
+}
+
 static int over(const prp_state *s) { return kite_max_roundoff(s->ctx) > s->maxround; }
 
 // x = x^(2^count), each squaring checked: one over the limit is replayed from the last snapshot
@@ -355,6 +370,7 @@ static int state_new(prp_state *s, uint64_t k, uint64_t n, kite_opts o, double m
     // spot an FFT length that is too short. Arithmetic errors are caught by Gerbicz either way.
     uint32_t L = kite_fft_len(s->ctx);
     kite_set_roundoff_check(s->ctx, (double)n / L > kite_safe_bpw(L, k) ? 1 : 4);
+    kite_set_sum_check(s->ctx, 1);
     kite_num **nums[] = {&s->x, &s->d, &s->x0, &s->t, &s->r, &s->r2, &s->c1, &s->c2, &s->b};
     for (size_t i = 0; i < sizeof nums / sizeof nums[0]; i++) {
         *nums[i] = kite_num_new(s->ctx);
@@ -438,6 +454,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
     prp_state s = {0};
     if (state_new(&s, k, n, o.fft, maxround)) {
         res->careful_ops += s.careful;
+        if (s.ctx) res->sum_errors += kite_sum_errors(s.ctx);
         state_free(&s);
         return -1;
     }
@@ -472,6 +489,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
                 kite_opts fo = o.fft;
                 fo.fft_len = L;
                 res->careful_ops += s.careful;
+        if (s.ctx) res->sum_errors += kite_sum_errors(s.ctx);
                 state_free(&s);
                 if (state_new(&s, k, n, fo, maxround)) {
                     rc = -1;
@@ -540,7 +558,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
                     pcb = pend.count;
                     jb = j;
                 }
-                kite_square(s.ctx, s.x);
+                square_at(&s, s.x, i);
                 i++;
                 if (o.inject_fault_at && i == o.inject_fault_at) {
                     kite_debug_corrupt(s.ctx, s.x);
@@ -553,7 +571,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
                     i = ib;
                     pi = pib;
                     for (uint32_t jj = jb; jj < j; jj++) {
-                        kite_square(s.ctx, s.x);
+                        square_at(&s, s.x, i);
                         i++;
                         if (pi < o.npoints && o.points[pi] == i && o.on_point) pending_add(&pend, s.ctx, pi++, s.x);
                     }
@@ -592,6 +610,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
                 kite_get_limbs(s.ctx, s.d, md);
                 kite_get_limbs(s.ctx, s.t, mt);
                 res->careful_ops += s.careful;
+        if (s.ctx) res->sum_errors += kite_sum_errors(s.ctx);
                 state_free(&s);
                 if (!fo.fft_len || state_new(&s, k, n, fo, maxround)) {
                     free(mx), free(md), free(mt);
@@ -650,6 +669,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
             kite_opts fo = o.fft;
             fo.fft_len = kite_next_fft_len(L + L / 25);
             res->careful_ops += s.careful;
+        if (s.ctx) res->sum_errors += kite_sum_errors(s.ctx);
             state_free(&s);
             if (!fo.fft_len || state_new(&s, k, n, fo, maxround)) {
                 rc = -2;
@@ -705,6 +725,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
                     kite_opts fo = o.fft;
                     fo.fft_len = kite_next_fft_len(L + L / 25);
                     res->careful_ops += s.careful;
+        if (s.ctx) res->sum_errors += kite_sum_errors(s.ctx);
                     state_free(&s);
                     if (!fo.fft_len || state_new(&s, k, n, fo, maxround)) {
                         rc = -2;
@@ -756,6 +777,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
     if (kite_max_roundoff(s.ctx) > res->maxerr) res->maxerr = kite_max_roundoff(s.ctx);
 out:
     res->careful_ops += s.careful;
+        if (s.ctx) res->sum_errors += kite_sum_errors(s.ctx);
     res->seconds = now() - t_start;
     pending_clear(&pend);
     free(pend.index);

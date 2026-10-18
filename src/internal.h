@@ -35,6 +35,7 @@ struct kite_ctx {
     uint32_t L;           // FFT length in real words
     uint32_t threads;
     uint32_t plan_order;  // bit 0: column radices ascending, bit 1: row radices ascending
+    uint32_t rows;        // NEON matrix rows R (H = R x C); 0 = choose_shape's balance
     uint8_t *bits;        // bits[j] = s_{j+1} - s_j
     uint64_t lam;         // log2(k) as a 64-bit binary fraction (T' = n + lam/2^64)
     uint64_t sL;          // s_L
@@ -52,6 +53,13 @@ struct kite_ctx {
     void *bk;             // backend private state
     size_t num_doubles;   // doubles per kite_num
     int64_t *tmpdig;      // L digits scratch
+    // Sum check (NEON): on checked squarings the sum of the inverse FFT's outputs must be
+    // sum_scale * (sum of the inputs)^2; sum_x is the number whose input sum is sum_in (NULL =
+    // none known; any write to that number other than a squaring forgets it).
+    int sum_on;
+    const double *sum_x;
+    double sum_in, sum_out, sum_abs, sum_scale;
+    uint32_t sum_errors;
 };
 
 // Backends convert between their storage and balanced integer digits.
@@ -80,10 +88,14 @@ uint32_t kite_choose_fft_len(uint64_t k, uint64_t n);
 uint32_t kite_choose_fft_len_edge(uint64_t k, uint64_t n);
 uint32_t kite_next_fft_len(uint32_t L);
 uint32_t kite_tuned_plan_order(uint32_t L);
+uint32_t kite_tuned_rows(uint32_t L);
 // y = base^(N+1) mod N (n limbs) -> base^(N-1) mod N, also when gcd(base, N) > 1
 // (src/prp.c); returns -1 if the base-prime part of N does not fit a word.
 int kite_residue_nm1(uint64_t *y, const uint64_t *N, size_t n, uint64_t base);
 double kite_safe_bpw(uint32_t L, uint64_t k);
+static inline void kite_sum_forget(kite_ctx *ctx, const kite_num *x) {
+    if (ctx->sum_x == x->d) ctx->sum_x = NULL;
+}
 double kite_fit_bpw(uint32_t L, uint64_t k);
 double kite_edge_bpw(uint32_t L, uint64_t k);
 // Layout helpers shared by the backends (exact rational arithmetic in T').

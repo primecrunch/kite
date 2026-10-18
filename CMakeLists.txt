@@ -83,6 +83,7 @@ add_test(NAME prst_kill COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/
 # finishes the proof from the products written
 add_test(NAME prst_proof_stop COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/prst_proof_stop.py $<TARGET_FILE:kite-prst>)
 add_test(NAME edge_careful COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/edge_careful.py $<TARGET_FILE:kite>)
+add_test(NAME sum_check COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/sum_check.py $<TARGET_FILE:kite>)
 # LLR (Morrison) results checked against PRST 14.0.1888: two primes, composites by RES64
 add_test(NAME llr_prime_3_26459 COMMAND $<TARGET_FILE:kite> llr 3 26459 --expect prime)
 add_test(NAME llr_prime_3_41628 COMMAND $<TARGET_FILE:kite> llr 3 41628 --expect prime)

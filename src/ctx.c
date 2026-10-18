@@ -44,7 +44,8 @@ static double edge_delta(uint32_t L) { return L < 40960 ? 0.05 : L < 163840 ? 0.
 double kite_edge_bpw(uint32_t L, uint64_t k) { return kite_fit_bpw(L, k) + edge_delta(L); }
 
 // Measured squaring times (us) per FFT length, loaded from a tuning file with
-// lines "L us [order]" (see `kite tune`; order as kite_opts.plan_order bits,
+// lines "L us [order [rows]]" (see `kite tune`; order as kite_opts.plan_order bits, rows the
+// matrix rows R or 0 for the default shape,
 // 0 if absent). Path: $KITE_FFT_TIMES, else ~/.kite/fft_times.txt, else the
 // built-in table from M4 and M4 Pro measurements (fft_times_default.h).
 static struct {
@@ -53,26 +54,30 @@ static struct {
     uint32_t *L;
     double *us;
     uint8_t *ord;
+    uint32_t *rows;
 } g_times;
 
 #include "fft_times_default.h"
 
-static void add_time(uint32_t L, double us, uint32_t ord, uint32_t *cap) {
+static void add_time(uint32_t L, double us, uint32_t ord, uint32_t rows, uint32_t *cap) {
     if (g_times.n == *cap) {
         *cap = *cap ? 2 * *cap : 256;
         g_times.L = realloc(g_times.L, *cap * sizeof(uint32_t));
         g_times.us = realloc(g_times.us, *cap * sizeof(double));
         g_times.ord = realloc(g_times.ord, *cap);
+        g_times.rows = realloc(g_times.rows, *cap * sizeof(uint32_t));
     }
     g_times.L[g_times.n] = L;
     g_times.ord[g_times.n] = (uint8_t)ord;
+    g_times.rows[g_times.n] = rows;
     g_times.us[g_times.n++] = us;
 }
 
 static void load_default_times(void) {
     uint32_t cap = 0;
     for (size_t i = 0; i < sizeof kite_default_times / sizeof kite_default_times[0]; i++)
-        add_time(kite_default_times[i].L, kite_default_times[i].us, kite_default_times[i].ord, &cap);
+        add_time(kite_default_times[i].L, kite_default_times[i].us, kite_default_times[i].ord,
+                 kite_default_times[i].rows, &cap);
 }
 
 static void load_times(void) {
@@ -92,16 +97,25 @@ static void load_times(void) {
         if (!getenv("KITE_NO_DEFAULT_TIMES")) load_default_times();
         return;
     }
-    uint32_t cap = 0, L, ord;
+    uint32_t cap = 0, L, ord, rows;
     double us;
     char line[256];
     while (fgets(line, sizeof line, f)) {
-        int got = sscanf(line, "%u %lf %u", &L, &us, &ord);
+        int got = sscanf(line, "%u %lf %u %u", &L, &us, &ord, &rows);
         if (got < 2) continue;
         if (got < 3 || ord > 3) ord = 0;
-        add_time(L, us, ord, &cap);
+        if (got < 4) rows = 0;
+        add_time(L, us, ord, rows, &cap);
     }
     fclose(f);
+}
+
+uint32_t kite_tuned_rows(uint32_t L) {
+    load_times();
+    for (uint32_t i = 0; i < g_times.n; i++) {
+        if (g_times.L[i] == L) return g_times.rows[i];
+    }
+    return 0;
 }
 
 uint32_t kite_tuned_plan_order(uint32_t L) {
@@ -287,6 +301,7 @@ kite_ctx *kite_ctx_new(uint64_t k, uint64_t n, int32_t c, const kite_opts *o) {
                             : kite_choose_fft_len(k, n);
     ctx->threads = o && o->threads ? o->threads : 1;
     ctx->plan_order = o && o->plan_order ? (o->plan_order - 1) & 3 : kite_tuned_plan_order(ctx->L);
+    ctx->rows = o && o->rows ? o->rows : kite_tuned_rows(ctx->L);
     ctx->err_every = 1;
     if (!kite_fft_len_ok(ctx->L) || ctx->L > n) goto fail;
 
@@ -356,6 +371,8 @@ const char *kite_backend_name(const kite_ctx *ctx) { return ctx->ops->name; }
 double kite_max_roundoff(const kite_ctx *ctx) { return ctx->maxerr; }
 void kite_reset_roundoff(kite_ctx *ctx) { ctx->maxerr = 0; }
 void kite_set_roundoff_check(kite_ctx *ctx, uint32_t every) { ctx->err_every = every ? every : 1; }
+void kite_set_sum_check(kite_ctx *ctx, int on) { ctx->sum_on = on; }
+uint32_t kite_sum_errors(const kite_ctx *ctx) { return ctx->sum_errors; }
 size_t kite_limbs(const kite_ctx *ctx) { return ctx->nlimbs; }
 
 kite_num *kite_num_new(kite_ctx *ctx) {
@@ -377,6 +394,7 @@ void kite_num_free(kite_ctx *ctx, kite_num *x) {
 }
 
 void kite_copy(kite_ctx *ctx, kite_num *dst, const kite_num *src) {
+    kite_sum_forget(ctx, dst);
     memcpy(dst->d, src->d, ctx->num_doubles * sizeof(double));
 }
 
@@ -386,15 +404,23 @@ void kite_square_n(kite_ctx *ctx, kite_num *x, uint64_t count) {
     for (uint64_t i = 0; i < count; i++) ctx->ops->square(ctx, x);
 }
 
-void kite_mul(kite_ctx *ctx, kite_num *x, const kite_num *y) { ctx->ops->mul(ctx, x, y); }
-void kite_mul_small(kite_ctx *ctx, kite_num *x, int64_t m) { ctx->ops->mul_small(ctx, x, m); }
+void kite_mul(kite_ctx *ctx, kite_num *x, const kite_num *y) {
+    kite_sum_forget(ctx, x);
+    ctx->ops->mul(ctx, x, y);
+}
+void kite_mul_small(kite_ctx *ctx, kite_num *x, int64_t m) {
+    kite_sum_forget(ctx, x);
+    ctx->ops->mul_small(ctx, x, m);
+}
 
 // Every backend stores weighted digits put through linear FFT stages, so the arrays add.
 void kite_add(kite_ctx *ctx, kite_num *x, const kite_num *y) {
+    kite_sum_forget(ctx, x);
     for (size_t i = 0; i < ctx->num_doubles; i++) x->d[i] += y->d[i];
 }
 
 void kite_sub(kite_ctx *ctx, kite_num *x, const kite_num *y) {
+    kite_sum_forget(ctx, x);
     for (size_t i = 0; i < ctx->num_doubles; i++) x->d[i] -= y->d[i];
 }
 
@@ -573,6 +599,7 @@ void kite_get_limbs(kite_ctx *ctx, const kite_num *x, uint64_t *limbs) {
 }
 
 void kite_set_limbs(kite_ctx *ctx, kite_num *x, const uint64_t *limbs) {
+    kite_sum_forget(ctx, x);
     size_t nl = ctx->nlimbs + 1;
     uint64_t *a = calloc(nl, sizeof(uint64_t));
     memcpy(a, limbs, ctx->nlimbs * sizeof(uint64_t));
@@ -600,6 +627,7 @@ void kite_set_limbs(kite_ctx *ctx, kite_num *x, const uint64_t *limbs) {
 }
 
 void kite_set_u64(kite_ctx *ctx, kite_num *x, uint64_t v) {
+    kite_sum_forget(ctx, x);
     uint64_t *t = calloc(ctx->nlimbs, sizeof(uint64_t));
     t[0] = v;
     kite_set_limbs(ctx, x, t);
