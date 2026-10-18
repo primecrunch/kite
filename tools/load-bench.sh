@@ -2,7 +2,7 @@
 # Squaring rate with several tests running at once, kite-prst against PRST, at production sizes.
 #
 #   tools/load-bench.sh [--kite PATH] [--prst PATH] [--secs S] [--counts "1 P N"]
-#                       [--cases FILE] [--ladder] [--force]
+#                       [--cases FILE] [--ladder] [--abba] [--force]
 #   tools/load-bench.sh --verify [--kite-cli PATH] [--cases FILE]
 #
 # For each case and each test count, both engines run that many single-thread Fermat tests
@@ -13,6 +13,8 @@
 # (N - P), which is where a test's footprint shows. Don't use taskpolicy -b to isolate E-cores:
 # macOS lowers their clock for background work.
 #
+# --abba runs each row as kite, PRST, PRST, kite and averages the pairs, so a machine whose
+# clocks drift under sustained load (a MacBook Pro loses ~30% over minutes) favours neither.
 # --ladder adds FFT 32K-128K (k = 2007, about 13 bits per word) to find where kite's tables stop
 # fitting. --verify runs each case's full test with `kite prp --expect` instead, one at a time
 # (hours at these sizes). Environment variables such as KITE_NO_NTAB=1 reach kite-prst.
@@ -23,7 +25,7 @@
 set -eu
 
 kite=build/kite-prst; prst=; kite_cli=build/kite; secs=60; counts="1 P N"
-cases=tests/large_fft_cases.csv; ladder=0; force=0; verify=0
+cases=tests/large_fft_cases.csv; ladder=0; force=0; verify=0; abba=0
 while [ $# -gt 0 ]; do
     case $1 in
         --kite) kite=$2; shift ;;
@@ -33,6 +35,7 @@ while [ $# -gt 0 ]; do
         --counts) counts=$2; shift ;;
         --cases) cases=$2; shift ;;
         --ladder) ladder=1 ;;
+        --abba) abba=1 ;;
         --force) force=1 ;;
         --verify) verify=1 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -105,6 +108,7 @@ rate() {
     echo "$ms ${fft:--}"
 }
 
+mean2() { awk -v a="$1" -v b="$2" 'BEGIN { if (a == "-" || b == "-") print "-"; else printf "%.3f", (a + b) / 2 }'; }
 per_hour() { awk -v c="$1" -v ms="$2" -v n="$3" 'BEGIN { if (ms == "-") print "-"; else printf "%.1f", c * 3600 / (ms * n / 1000) }'; }
 
 echo "$(sysctl -n machdep.cpu.brand_string), $pcores P + $((ncpu - pcores)) E, $($kite -v | head -1)${prst:+, $($prst -v | head -1)}, ${secs} s per run${KITE_NO_NTAB:+, KITE_NO_NTAB=$KITE_NO_NTAB}"
@@ -121,10 +125,18 @@ case_list | while IFS=, read -r k n res; do
         case $c in P) count=$pcores ;; N) count=$ncpu ;; *) count=$c ;; esac
         set -- $(rate "$kite" "$k" "$n" "$count")
         kms=$1 kfft=$2
-        row="| ${k}·2^${n}−1 | $count | $kfft | $kms | $(per_hour "$count" "$kms" "$n") |"
         if [ -n "$prst" ]; then
             set -- $(rate "$prst" "$k" "$n" "$count")
             pms=$1 pfft=$2
+            if [ $abba = 1 ]; then
+                set -- $(rate "$prst" "$k" "$n" "$count")
+                pms=$(mean2 "$pms" "$1")
+                set -- $(rate "$kite" "$k" "$n" "$count")
+                kms=$(mean2 "$kms" "$1")
+            fi
+        fi
+        row="| ${k}·2^${n}−1 | $count | $kfft | $kms | $(per_hour "$count" "$kms" "$n") |"
+        if [ -n "$prst" ]; then
             vs=$(awk -v a="$kms" -v b="$pms" 'BEGIN { if (a == "-" || b == "-") print "-"; else printf "%.2f×", b / a }')
             row="$row $pfft | $pms | $(per_hour "$count" "$pms" "$n") | $vs |"
         fi

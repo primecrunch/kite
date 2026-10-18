@@ -1976,3 +1976,41 @@ the table path's (same residues, same max error).
 (−7%). At 45K–90K, patterns against the table on the M4: 1–2% slower alone, 4–9% faster at 10
 tests (0.235 → 0.225, 0.317 → 0.300, 0.514 → 0.470 ms), so the pattern path can replace the
 table at every size.
+
+## 2026-10-18 11:30 — Built-in FFT times; round-off is a policy question; 10×1 stays best
+
+**Built-in FFT times.** Client machines have no `~/.kite/fft_times.txt`, so every length ran stage
+order 0 and lengths came from the heuristic. One core, 256K–432K: order 3 (all radices ascending)
+is 2–4% faster than 0 (6767·2^3322174−1: 719 → 689 µs); under load on the M4, ABBA, 10 tests:
+−1.9% at 256K, −1.7% at 384K. `kite tune 98304 655360` on the M4 (174 lengths, order 3 best at
+86 of them) plus the M4 Pro's table below 98304 is now compiled in (`src/fft_times_default.h`,
+`tools/gen_fft_times.sh`); with measurements in range only measured lengths are candidates (the
+tune output skips lengths the NEON backend cannot shape). M4, 10 tests, ABBA against the
+heuristic: −1.7% (6767, 256K, order), −5.7% (6073·2^2290815−1 at 179200 instead of 184320),
+−2.1% (2007·2^638977−1 at 48K instead of 45K).
+
+M4 with every core busy, 0.1.10 against PRST (`docs/results/load-bench-2026-10-18-m4-0.1.10.md`):
+1.02× (160K), 1.06× (175K against 192K), 0.99× (240K), 0.96× (256K), 1.01× (288K), 0.97× (384K),
+0.89× (432K against 400K). 0.1.9 was 0.81–0.92×.
+
+**Round-off: gwnum is not more accurate, it runs closer to the edge.** The reference backend's
+max error equals the NEON backend's at the same length and bits per word (32K: 0.25 both at
+14.9 bpw; 64K: 0.375 both), so the NEON pipeline adds nothing; the k factor in `oscale` is the
+method's (Percival), as in gwnum. gwnum's limits from `prst -fft info` (largest n at a length):
+4813 at 400K 13.44 bpw (kite safe 13.10), 6767 at 256K ≥ 13.35 (13.05), 2007 at 240K 14.23
+(13.95), 6767 at 240K 13.36 (13.08), 2007 at 28K 15.11 (14.90). That is kite's fitted
+"max error 0.25 in a few hundred squarings" line, without kite's 0.2 margin: gwnum checks
+round-off near its limits and recovers from the rare bad iteration. kite throws away the round
+(up to 25% of the test) on an error over 0.40 and continues at a longer FFT, so it needs the
+margin. Over 306 cases (9 values of k, n = 2.3M–5.6M) the squaring time with no 0.25 room would
+be 0.979 of today's, with gwnum's limits 0.964. Running at the edge would need block-level retry
+(redo one block at a longer length and come back) and a round-off check on every squaring
+instead of every 4th (~1–2%), so the net is ~2%: not done.
+
+**Splits.** M4, 256K: 10×1 7.7 tests/hour, 5×2 5.9. One thread per test stays best.
+
+M4 Pro, every core busy, ABBA (`load-bench.sh --abba`: kite, PRST, PRST, kite, so the ~30%
+clock drift under sustained load favours neither; `docs/results/load-bench-2026-10-18-m4pro-0.1.10-abba.md`):
+1.13× (160K), 1.10× (175K against 192K), 1.01× (240K), 0.99× (256K), 1.03× (288K), 1.00× (384K),
+0.94× (432K against 400K). On both machines kite is now level with or ahead of PRST at n ≤ 4.8M
+with every core busy, and behind only where PRST runs a shorter length.
