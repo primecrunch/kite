@@ -80,15 +80,17 @@ core, as primecrunch runs), `tools/load-bench.sh` gives kite against PRST in tes
 | 6073·2^2290815−1 | 175K / 192K | 1.06× | 1.10× |
 | 2009·2^3322280−1 | 240K / 240K | 0.99× | 1.01× |
 | 6767·2^3322174−1 | 256K / 256K | 0.96× | 0.99× |
-| 999·2^4000000−1 | 288K / 288K | 1.01× | 1.03× |
+| 999·2^4000000−1 | 270K / 288K (0.1.12) | 1.02× | 1.03× (288K) |
 | 6119·2^4838048−1 | 384K / 384K | 0.97× | 1.00× |
-| 4813·2^5500155−1 | 432K / 400K | 0.89× | 0.94× |
+| 4813·2^5500155−1 | 400K / 400K (0.1.12) | 0.98× | 0.94× (432K) |
 
 The M4 Pro column is ABBA (kite, PRST, PRST, kite), since its clocks fall ~30% over minutes of
 full load. With 0.1.8 the same rows were 0.65–0.93×: the normaliser's 6 MB table did not fit the
 cache with a test on every core (`docs/large-fft-plan.md`). PRST is ahead where gwnum runs a
 shorter FFT: it runs ~0.3 bits per word closer to the round-off limit, not with a more accurate
-transform (journal, 2026-10-18).
+transform (journal, 2026-10-18). Since 0.1.12 kite does the same: a squaring over 0.40 is redone
+carefully at the same length, so Fermat lengths sit up to 0.15 bits per word past the fit
+(`kite_edge_bpw`), and the two rows marked 0.1.12 moved to 270K and 400K (M4 column, ABBA).
 
 PRST 14.0.1888 runs under Rosetta. On LLR kite does half the work for a prime: PRST computes
 the Lucas U and V sequences together so that a Gerbicz–Li check can verify them, kite computes
