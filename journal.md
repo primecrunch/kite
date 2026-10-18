@@ -2168,3 +2168,10 @@ limit, so `kite_prp` redoes the squaring carefully, as PRST repeats a suspect op
 check on every squaring an injected fault is caught at the next squaring (sum_errors 1,
 gerbicz_errors 0, residue correct); at 1 in 64 Gerbicz catches it as before. `sum_errors` is
 reported per test, which a client could use to flag unreliable hardware. New ctest `sum_check`.
+
+Loaded order tune on the M4 (`kite tune 147456 471040 --load 10 --secs 2`, 108 lengths,
+`tune/fft_orders_m4_load.txt`): fastest order 3 at 53, 2 at 21, 1 at 19, 0 at 15; it differs from
+the single-core choice at 26 lengths. `tools/gen_fft_times.sh` now takes orders from it where
+present and keeps the single-core times for the length choice. 400K moves to order 3 (−1.5%
+under load, measured above). Known residues after the change: 9357·2^200001−1 and
+6073·2^2290815−1 (168K, 1080 s on the M4, no careful redos, no sum errors).

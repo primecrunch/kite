@@ -1,8 +1,12 @@
 #!/bin/sh
 # Rebuild src/fft_times_default.h from the tuning files: tune/fft_times_m4pro.txt below 98304,
-# tune/fft_times_m4.txt from 98304 (`kite tune LMIN LMAX --out FILE` makes them).
+# tune/fft_times_m4.txt from 98304 (`kite tune LMIN LMAX --out FILE` makes them); times stay
+# single-core (the length choice compares them), orders come from the loaded tune where present.
 cd "$(dirname "$0")/.." || exit 1
+# Stage orders from tune/fft_orders_m4_load.txt (`kite tune --load 10` on the M4, 144K-460K) replace
+# the single-core ones where present: with every core busy the fastest order can differ.
 { awk '$1 < 98304' tune/fft_times_m4pro.txt; awk '$1 >= 98304' tune/fft_times_m4.txt; } |
+    awk 'NR == FNR { ord[$1] = $3; next } { if ($1 in ord) $3 = ord[$1]; print }' tune/fft_orders_m4_load.txt - |
     sort -n -k1,1 | python3 -c '
 import sys
 rows = [l.split() for l in sys.stdin if l.strip()]
