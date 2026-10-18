@@ -1,0 +1,183 @@
+diff --git a/gen/gen_kernels.py b/gen/gen_kernels.py
+index 9f2dcfe..81faeda 100644
+--- a/gen/gen_kernels.py
++++ b/gen/gen_kernels.py
+@@ -783,6 +783,129 @@ def gen_norm_tab(g, mode, err, P):
+     E("ret")
+ 
+ 
++def gen_norm_cmp(g, mode, err, P):
++    """Normalisation in the scaled form of gen_norm_tab, with the table's records {osc, ib, bw}
++    computed per digit from the compressed weights (A, IA, mask, consts as gen_norm) instead of
++    loaded, P row pairs (P carry chains) per iteration. Same ABI as kite_norm_*; npairs must be
++    a multiple of P. Name: kite_norm_{a,b,c}{x,y}[e] for P = 1, 2.
++
++    The records come out equal to gen_norm_tab's (osc = IA*IBs[i]*2^e, ib = 2^-(b+big),
++    bw = A*B[i]*2^-e * 2^(b+big): power-of-two scalings of the same products), so the digits
++    are bit for bit those of the table path, and mode b's output (the scaled digit) is what
++    mode c of either family reads. The carry chain is two instructions per digit (fmla,
++    frintn) against three in gen_norm, and P chains run in parallel; the per-digit weight work
++    is independent of the chain and reuses six temporaries through renaming."""
++    sfx = {1: "x", 2: "y"}[P]
++    name = "%snorm_%s%s%s" % (PREFIX, mode, sfx, "e" if err else "")
++    g.out.append("")
++    g.out.append(".globl %s" % name)
++    g.out.append(".p2align 5")
++    g.label(name)
++    g.out.append(SAVE)
++    E = g.emit
++    # registers: digits v0-v7 (pair p: v4p..v4p+3), staging/temps v8-v15, carry v16+p,
++    # A v18+p, B v20-21, IBs v22-23, IA v24+p, mask v26+p, max error v28, 2^-b v29, 2^b v30,
++    # 1<<52 v31
++    E("ldr q30, [x7, #256]")  # base0
++    E("ldr q29, [x7, #272]")  # ibase0
++    E("ldr q31, [x7, #288]")  # K52
++    E("movi v28.2d, #0")
++    rowregs = ["x0", "x9", "x10", "x11"][:2 * P]
++    for i in range(1, 2 * P):
++        E("add %s, %s, x1" % (rowregs[i], rowregs[i - 1]))
++    E("lsl x1, x1, #%d" % {1: 1, 2: 2}[P])
++    if P > 1:
++        E("lsr x2, x2, #1")
++    CIN, AR, IAR, MR = 16, 18, 24, 26
++    g.label("1")
++    if P == 1:
++        E("ldr q%d, [x3]" % CIN)
++        E("ldr q%d, [x4], #16" % AR)
++        E("ldr q%d, [x5], #16" % IAR)
++        E("ldr q%d, [x6], #16" % MR)
++    else:
++        E("ldp q%d, q%d, [x3]" % (CIN, CIN + 1))
++        E("ldp q%d, q%d, [x4], #32" % (AR, AR + 1))
++        E("ldp q%d, q%d, [x5], #32" % (IAR, IAR + 1))
++        E("ldp q%d, q%d, [x6], #32" % (MR, MR + 1))
++    TE, TB, IB, OSC, BW, T = 8, 9, 10, 11, 12, 13
++    for lg in range(4):
++        E("ldp q20, q21, [x7, #%d]" % (32 * lg))        # B[4lg .. 4lg+3]
++        E("ldp q22, q23, [x7, #%d]" % (128 + 32 * lg))  # IBs
++        for p in range(P):
++            r0, r1 = rowregs[2 * p], rowregs[2 * p + 1]
++            a, b, c, d = 8, 9, 10, 11
++            E("ldr q%d, [%s, #%d]" % (a, r0, 16 * lg))
++            E("ldr q%d, [%s, #%d]" % (b, r0, 64 + 16 * lg))
++            E("ldr q%d, [%s, #%d]" % (c, r1, 16 * lg))
++            E("ldr q%d, [%s, #%d]" % (d, r1, 64 + 16 * lg))
++            D = [4 * p + k for k in range(4)]
++            E("trn1 v%d.2d, v%d.2d, v%d.2d" % (D[0], a, c))
++            E("trn1 v%d.2d, v%d.2d, v%d.2d" % (D[1], b, d))
++            E("trn2 v%d.2d, v%d.2d, v%d.2d" % (D[2], a, c))
++            E("trn2 v%d.2d, v%d.2d, v%d.2d" % (D[3], b, d))
++        for k in range(4):
++            i = 4 * lg + k
++            last = mode == "c" and i == 15
++            breg = "v%d.d[%d]" % (20 + k // 2, k % 2)
++            ibreg = "v%d.d[%d]" % (22 + k // 2, k % 2)
++            for p in range(P):
++                Dk, cin = 4 * p + k, CIN + p
++                E("shl v%d.2d, v%d.2d, #%d" % (TE, MR + p, 52 - i))
++                E("and v%d.16b, v%d.16b, v31.16b" % (TE, TE))           # te
++                E("shl v%d.2d, v%d.2d, #%d" % (TB, MR + p, 36 - i))
++                E("and v%d.16b, v%d.16b, v31.16b" % (TB, TB))           # tb
++                E("sub v%d.2d, v29.2d, v%d.2d" % (IB, TB))              # ib = 1/base
++                if mode != "b":
++                    E("fmul v%d.2d, v%d.2d, %s" % (BW, AR + p, breg))
++                    E("sub v%d.2d, v%d.2d, v%d.2d" % (BW, BW, TE))      # w
++                    E("add v%d.2d, v30.2d, v%d.2d" % (TB, TB))          # base
++                    E("fmul v%d.2d, v%d.2d, v%d.2d" % (BW, BW, TB))     # bw = base * w
++                if mode != "c":
++                    E("fmul v%d.2d, v%d.2d, %s" % (OSC, IAR + p, ibreg))
++                    E("add v%d.2d, v%d.2d, v%d.2d" % (OSC, OSC, TE))    # osc
++                    E("fmul v%d.2d, v%d.2d, v%d.2d" % (Dk, Dk, OSC))
++                    if err:
++                        E("frintn v%d.2d, v%d.2d" % (T, Dk))
++                        E("fabd v%d.2d, v%d.2d, v%d.2d" % (TE, Dk, T))
++                        E("fmax v28.2d, v28.2d, v%d.2d" % TE)
++                        E("fmul v%d.2d, v%d.2d, v%d.2d" % (Dk, T, IB))
++                    else:
++                        E("frintn v%d.2d, v%d.2d" % (Dk, Dk))
++                        E("fmul v%d.2d, v%d.2d, v%d.2d" % (Dk, Dk, IB))
++                E("fmla v%d.2d, v%d.2d, v%d.2d" % (Dk, cin, IB))
++                if last:
++                    E("movi v%d.2d, #0" % cin)
++                else:
++                    E("frintn v%d.2d, v%d.2d" % (cin, Dk))
++                    E("fsub v%d.2d, v%d.2d, v%d.2d" % (Dk, Dk, cin))
++                if mode != "b":
++                    E("fmul v%d.2d, v%d.2d, v%d.2d" % (Dk, Dk, BW))
++        for p in range(P):
++            r0, r1 = rowregs[2 * p], rowregs[2 * p + 1]
++            a, b, c, d = 8, 9, 10, 11
++            D = [4 * p + k for k in range(4)]
++            E("trn1 v%d.2d, v%d.2d, v%d.2d" % (a, D[0], D[2]))
++            E("trn1 v%d.2d, v%d.2d, v%d.2d" % (b, D[1], D[3]))
++            E("trn2 v%d.2d, v%d.2d, v%d.2d" % (c, D[0], D[2]))
++            E("trn2 v%d.2d, v%d.2d, v%d.2d" % (d, D[1], D[3]))
++            E("str q%d, [%s, #%d]" % (a, r0, 16 * lg))
++            E("str q%d, [%s, #%d]" % (b, r0, 64 + 16 * lg))
++            E("str q%d, [%s, #%d]" % (c, r1, 16 * lg))
++            E("str q%d, [%s, #%d]" % (d, r1, 64 + 16 * lg))
++    if P == 1:
++        E("str q%d, [x3], #16" % CIN)
++    else:
++        E("stp q%d, q%d, [x3], #32" % (CIN, CIN + 1))
++    for r in rowregs:
++        E("add %s, %s, x1" % (r, r))
++    E("subs x2, x2, #1")
++    E("b.ne 1b")
++    E("fmaxp d0, v28.2d")
++    g.out.append(RESTORE)
++    E("ret")
++
++
+ def gen_rows(g):
+     """void kite_rows_in(const double *rp, const double *rpp, double *scr, size_t C)
+        void kite_rows_out(double *rp, double *rpp, const double *scr, size_t C)
+@@ -1215,6 +1338,8 @@ def main():
+             gen_norm(g, mode, err)
+             for P in (1, 2, 4):
+                 gen_norm_tab(g, mode, err, P)
++            for P in (1, 2):
++                gen_norm_cmp(g, mode, err, P)
+     write(outdir, "norm.S", g)
+     g = Gen()
+     gen_rows(g)
+diff --git a/src/kernels.h b/src/kernels.h
+index f5e0762..fe64f67 100644
+--- a/src/kernels.h
++++ b/src/kernels.h
+@@ -68,6 +68,17 @@ KITE_NORM(aoe)
+ KITE_NORM(bo)
+ KITE_NORM(boe)
+ KITE_NORM(co)
++// compressed weights in the table's scaled form, 1 or 2 row pairs per iteration (gen_norm_cmp)
++KITE_NORM(ax)
++KITE_NORM(axe)
++KITE_NORM(bx)
++KITE_NORM(bxe)
++KITE_NORM(cx)
++KITE_NORM(ay)
++KITE_NORM(aye)
++KITE_NORM(by)
++KITE_NORM(bye)
++KITE_NORM(cy)
+ #undef KITE_NORM
+ 
+ void kite_rows_in(const double *rp, const double *rpp, double *scr, size_t C);
+
+# src/neon.c norm_rows, compressed branch:
+        // two row pairs (two carry chains) per call, one for an odd pair left over
+        static const norm_fn yfns[3][2] = {
+            {kite_norm_ay, kite_norm_aye}, {kite_norm_by, kite_norm_bye}, {kite_norm_cy, kite_norm_cy}};
+        static const norm_fn xfns[3][2] = {
+            {kite_norm_ax, kite_norm_axe}, {kite_norm_bx, kite_norm_bxe}, {kite_norm_cx, kite_norm_cx}};
+        size_t np = (r1 - r0) / 2, ny = np & ~(size_t)1;
+        e = 0;
+        if (ny) e = yfns[mode][err](gb, st->rowstride, ny, carr + r0, st->A + idx, st->IA + idx,
+                                    st->mask + idx, st->nconsts);
+        if (np - ny) {
+            size_t o = 2 * ny;
+            double e2 = xfns[mode][err]((double *)((char *)gb + o * st->rowstride), st->rowstride,
+                                        1, carr + r0 + o, st->A + idx + o, st->IA + idx + o,
+                                        st->mask + idx + o, st->nconsts);
+            if (e2 > e) e = e2;
+        }

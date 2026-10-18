@@ -1817,3 +1817,114 @@ correctly for that size. The plan for production sizes is in `docs/large-fft-pla
 
 `taskpolicy -b` does not isolate E-cores usefully: macOS also lowers their clock (kite 5.8 ms per
 squaring alone), and PRST printed no progress within 60 s under it.
+
+## 2026-10-17 21:10 — Load benchmark baseline: M4 and M4 Pro, FFT 28K–432K
+
+`tools/load-bench.sh --ladder`, 0.1.8 against PRST 14.0.1888, both machines quiet, 60 s per run.
+Full tables in `docs/results/load-bench-2026-10-17-m4.md` (eagle, 4P + 6E) and
+`-m4pro.md` (wolf, 10P + 4E). kite against PRST in tests per hour, all cores busy:
+
+| FFT (kite) | M4, 10 tests | M4 Pro, 14 tests | `ntab` |
+|---|--:|--:|---|
+| 28K | 1.14× | 1.33× | on |
+| 48K | 1.54× | 1.91× | on |
+| 64K | 0.94× | 1.10× | on |
+| 96K / 89600 | 0.87× | 1.06× | on |
+| 128K / 120K | 0.78× | 1.03× | on |
+| 160K | 0.78× | 0.93× | on |
+| 192K | 0.71× | 0.87× | on |
+| 256K (two cases) | 0.65–0.66× | 0.81–0.84× | on |
+| 288K | 0.90× | 0.96× | off |
+| 384K | 0.88× | 0.96× | off |
+| 432K (PRST 400K) | 0.81× | 0.93× | off |
+
+- With the table on, the M4 falls behind from 64K, where 6 tests' footprint (~2.5 MB each)
+  already exceeds the E-cluster's 4 MB L2, and the M4 Pro from 160K. Above the H ≤ 2^17 cut-off
+  (288K+) the gap closes to 4–12%: the table is most of the loss, as `KITE_NO_NTAB` showed.
+- On the M4 Pro the 4 E-cores add nothing to kite at 160K–256K (10 tests 9.5/h, 14 tests 9.6/h
+  at 256K), against +10–15% for PRST.
+- Alone, kite is 0–12% ahead up to 256K and 5–10% behind above it (compressed normaliser,
+  step 3; at 432K also PRST's shorter 400K length, step 4).
+- The 28K and 48K PRST rows read slow: 48K gives 188 tests/h on 10 P-cores against 283–307 from
+  complete tests in the README. Either PRST's "time per op" counts differently there or it
+  picks a slower FFT type for this k; check with complete tests before using those ratios.
+
+## 2026-10-17 22:30 — 0.1.9: the normaliser table only up to FFT 96K, and a refitted length choice
+
+Three candidates from `docs/large-fft-plan.md`, each measured with every core busy before
+keeping it.
+
+**Normaliser table cut-off (kept).** `KITE_NTAB=on|off` sweep at FFT 28K–256K, both machines,
+one test per P-core and one per core (`docs/results/ntab-sweep-2026-10-17.md`). All cores, ms
+per squaring, off against on: the table wins up to 64K (M4 −5% to −7%, M4 Pro −7% to −10% for
+off), 90K is level within 3%, and off wins from 120K: −6% / −4% at 120K, −15% / −10% at 160K,
+−22% / −14% at 240K, −24% / −16% at 256K (M4 / M4 Pro). The cut-off goes from H ≤ 2^17
+(FFT 256K, set from one test alone) to H ≤ 49152 (FFT 96K), the same on both machines. One
+test alone is ~11% slower without the table at 240K; primecrunch runs a test on every core.
+
+**Generated four-step twiddles (dropped).** Building each group's twiddles in a per-thread
+scratch from two small tables (w^{(8g+j)k_r} = hi[g][p] · lo[p][j]) removes the 2 MB table at
+256K. One core: +6% (727 → 770 µs per squaring at 256K), and the max error rises 0.039 → 0.047
+(two rounded factors). 10 tests on the M4: 1.55 → 1.61 ms with the normaliser table off, 2.87 →
+2.91 at 432K. The extra complex multiply per element costs more than the traffic it saves even
+on E-cores. Patch: `docs/experiments/t4-generated-twiddles.patch`.
+
+**Two-chain compressed normaliser (dropped).** A version of the no-table normaliser in the
+table path's scaled form (carry chain fmla + frintn instead of fadd + fmul + frintn), two row
+pairs per iteration. Bit-identical output (same max error, same residues). One core: no gain
+(still 12% behind the table), so that path is limited by its 18 vector ops per digit, not by the
+chain. 10 tests on the M4: 1.522–1.532 against 1.533–1.571 ms, under the 3% bar. Patch:
+`docs/experiments/norm-two-chain-compressed.patch`.
+
+**FFT length choice (kept).** Client machines have no `~/.kite/fft_times.txt`, so the length
+comes from `cost_model`, which charged 3.5%, 5.9% and 8.2% per factor of 3, 5 and 7. Fitted to
+`tune/fft_times_m4pro.txt` they cost about 2%, 4% and 5%; every length there with both 3 and 7
+that ran 2.4–4× slow is divisible by 21, so those are excluded. With the refit, 2009·2^3322280−1
+moves from 256K to 240K (one core 710 → 654 µs, max error 0.039 → 0.156) and 6073·2^2290815−1
+first to 172800 (slower, 512 µs against 503, max error 0.28: at the edge of the safe-bpw model).
+So a heuristic choice now also needs 0.25 bits per word below the safe limit when any length in
+the range has it; that gives 184320 (498 µs, max error 0.09). 400K for 4813·2^5500155−1, PRST's
+length, is unsafe for kite: max error 0.375 in 2000 squarings. PRST's FFT carries less round-off
+at the same bits per word; closing that is an accuracy project, not a tuning one.
+
+Version 0.1.9.
+
+## 2026-10-18 08:30 — 0.1.9 against PRST at production sizes, and round-off room everywhere
+
+`tools/load-bench.sh --ladder` again, 0.1.9 against PRST 14.0.1888, 60 s per run
+(`docs/results/load-bench-2026-10-18-m4-0.1.9.md`, `-m4pro-0.1.9.md`). wolf went into
+Maintenance Sleep every 15–20 minutes under `caffeinate -i` overnight, so the runs use
+`caffeinate -dims`; eagle had `dasd` on ~1.1 cores throughout, so its absolute figures may read
+a few percent slow, while each row's kite/PRST pair ran under the same load. Tests per hour with
+every core busy:
+
+| Case | kite FFT | M4 0.1.8 → 0.1.9 | vs PRST | M4 Pro 0.1.8 → 0.1.9 | vs PRST |
+|---|---|--:|--:|--:|--:|
+| 1021·2^2300003−1 | 160K | 14.4 → 16.8 (+17%) | 0.78× → 0.92× | 25.7 → 29.7 (+16%) | 0.93× → 1.00× |
+| 6073·2^2290815−1 | 192K → 180K | 11.3 → 14.2 (+26%) | 0.71× → 0.91× | 20.5 → 23.7 (+16%) | 0.87× → 0.97× |
+| 2009·2^3322280−1 | 256K → 240K | 5.4 → 7.5 (+39%) | 0.65× → 0.90× | 9.6 → 12.1 (+26%) | 0.81× → 0.95× |
+| 6767·2^3322174−1 | 256K | 5.4 → 6.9 (+28%) | 0.66× → 0.85× | 9.5 → 11.3 (+19%) | 0.84× → 0.91× |
+| 288K–432K | unchanged | same within noise | 0.81–0.90× | same | 0.88–0.95× |
+| ladder 120K/128K | 120K | 25.8 → 29.9 (+16%) | 0.78× → 0.90× | 48.3 → 50.1 | 1.03× → 0.99× |
+
+With only the P-cores busy kite is level or ahead on the M4 Pro (1.01–1.11×) and 2–8% behind on
+the M4. Alone it is 4–10% behind from 160K up: the price of the compressed normaliser, which
+primecrunch's one-test-per-core load more than repays. It is not yet ahead of PRST at n ≥ 2.3M
+with every core busy; PRST stays the engine for those machines.
+
+The eagle ladder exposed the round-off room: with no tune file, 2007·2^425985−1 moved from
+28672 to 30720 and lost 12% (655 → 579 tests per hour). 28672 is 0.04 bits per word inside
+`kite_safe_bpw`, and its max error reaches 0.31 in 20000 squarings (30720: 0.08), so a full
+test would likely cross 0.4 and lose time to Gerbicz retries. The room now applies with
+measured times as well (wolf's `~/.kite/fft_times.txt` had chosen 28672 too; it now takes 32768,
+65.9 µs and max error 0.02 against 60.8 µs).
+
+What is left at production sizes, in order of size:
+- the four-step twiddle table (2 MB at 256K): generating it cost more than it saved (above);
+  an in-kernel version that skips the scratch store and reload is the remaining variant;
+- the compressed normaliser's 18 ops per digit against the table's 7 (alone: 5–11%);
+- FFT accuracy: PRST runs 400K where kite needs 432K (max error 0.375 at 400K in 2000
+  squarings), 8% more work at the largest size.
+
+Blog material: the same table that made kite 1.25× faster than PRST at FFT 48K made it 1.5×
+slower at 256K, and only with every core busy. A benchmark of one test alone could not see it.

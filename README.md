@@ -70,6 +70,11 @@ sh kite-bench.sh
 | M4 Pro (10P+4E), quiet, 2026-10-16 | Fermat 9357·2^650001−1 | 91.3 s / 73.1 s | 345/h / 410/h (14 tests) | 1.25× alone, 1.19× all cores |
 | | LLR 4299·2^522773−1 | 131.6 s / 47.9 s | 237/h / 655/h (14 tests) | 2.75× alone, 2.76× all cores |
 
+At primecrunch's current sizes (n ≈ 2.3M–5.5M, FFT 160K–432K) kite 0.1.9 is level with PRST
+with only the P-cores busy and 0–15% behind with every core busy: 0.90× and 0.95× at
+2009·2^3322280−1 on an M4 and an M4 Pro (`tools/load-bench.sh`,
+`docs/results/load-bench-2026-10-18-*.md`, `docs/large-fft-plan.md`).
+
 PRST 14.0.1888 runs under Rosetta. On LLR kite does half the work for a prime: PRST computes
 the Lucas U and V sequences together so that a Gerbicz–Li check can verify them, kite computes
 V alone and confirms a composite result with a second run (see `docs/prst-compat.md`).

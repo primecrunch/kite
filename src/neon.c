@@ -432,6 +432,21 @@ static inline dinfo digit_info(const neon_state *st, uint32_t g, uint32_t r, uin
 #define s_at kite_s_at
 #define weight_at kite_weight
 
+// Table-driven normaliser: 48 bytes per element against 3 for the compressed weights. It saves
+// FP work (11% of a squaring alone at FFT 240K) and costs cache: with every core running a test
+// (how primecrunch runs kite), it wins up to FFT 64K and loses from 120K on both an M4 (4P + 6E)
+// and an M4 Pro (10P + 4E), by up to 24% at 256K on the M4; 90K is level within 3%
+// (docs/results/ntab-sweep-2026-10-17.md). Up to 0.1.8 the cut-off was H <= 2^17 (FFT 256K),
+// set from one test alone. KITE_NTAB=on|off overrides (KITE_NO_NTAB=1 is the old spelling of off).
+static int ntab_policy(const kite_ctx *ctx, uint32_t H) {
+    const char *e = getenv("KITE_NTAB");
+    (void)ctx;
+    if (getenv("KITE_NO_NTAB")) return 0;
+    if (e && !strcmp(e, "on")) return 1;
+    if (e && !strcmp(e, "off")) return 0;
+    return H <= 49152;
+}
+
 static int neon_init_impl(kite_ctx *ctx, int sme);
 static int neon_init(kite_ctx *ctx) { return neon_init_impl(ctx, 0); }
 
@@ -532,7 +547,7 @@ static int neon_init_impl(kite_ctx *ctx, int sme) {
 
     // table-driven normaliser for sizes where the extra traffic stays in cache:
     // per row pair and digit i, {osc[2], 1/base[2], base*w[2]} (see gen_norm_tab)
-    if (H <= (1u << 17) && !getenv("KITE_NO_NTAB")) {
+    if (ntab_policy(ctx, H)) {
         st->ntab = kite_alloc((size_t)st->ngroups * (R / 2) * NTAB_PAIR * sizeof(double));
         double *t = st->ntab;
         for (uint32_t g = 0; g < st->ngroups; g++) {

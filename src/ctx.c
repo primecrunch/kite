@@ -91,14 +91,18 @@ static double measured_us(uint32_t L) {
     return -1;
 }
 
-// Heuristic relative cost when no measurement is available: odd radices cost
-// more per point than radix 8/4/2.
+// Heuristic relative cost when no measurement is available: odd radices cost more per point
+// than radix 8/4/2. The penalties are fitted to tune/fft_times_m4pro.txt (one core, 32K-192K):
+// each factor of 3, 5 or 7 costs about 2%, 4% and 5% at L near 2^17. Every length there with
+// both 3 and 7 that ran 2.4-4x slow (100800, 108864, ..., 169344) is divisible by 21, so those
+// are never chosen without a measurement.
 static double cost_model(uint32_t L) {
     double c = log2((double)L);
+    if (L % 21 == 0) c += 100;
     uint32_t m = L;
-    while (m % 3 == 0) { m /= 3; c += 0.6; }
-    while (m % 5 == 0) { m /= 5; c += 1.0; }
-    while (m % 7 == 0) { m /= 7; c += 1.4; }
+    while (m % 3 == 0) { m /= 3; c += 0.35; }
+    while (m % 5 == 0) { m /= 5; c += 0.65; }
+    while (m % 7 == 0) { m /= 7; c += 0.85; }
     return (double)L * c;
 }
 
@@ -121,16 +125,23 @@ uint32_t kite_choose_fft_len(uint64_t k, uint64_t n) {
     }
     if (!Lmin) return 0;
     load_times();
-    // among safe lengths up to 30% longer, pick the cheapest
+    // among safe lengths up to 30% longer, pick the cheapest of those with ROOM bits per word to
+    // spare, unless none in the range has that room. At the edge of kite_safe_bpw the max error
+    // reaches ~0.3 within a few thousand squarings (28672 for 2007*2^425985-1: 0.31 in 20000,
+    // 172800 for 6073*2^2290815-1: 0.28 in 5000), so a full test runs into Gerbicz retries;
+    // with the room it stays near 0.1 (30720: 0.08, 184320: 0.09)
     uint32_t best = Lmin;
     double bestc = 1e300;
-    int have_all = 1;
+    int have_all = 1, roomy = 0;
+    const double ROOM = 0.25;
     for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
         if (!len_usable(L)) continue;
         if (measured_us(L) < 0) have_all = 0;
+        if ((double)n / L <= kite_safe_bpw(L, k) - ROOM) roomy = 1;
     }
     for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
         if (!len_usable(L)) continue;
+        if (roomy && (double)n / L > kite_safe_bpw(L, k) - ROOM) continue;
         double c = have_all ? measured_us(L) : cost_model(L);
         if (c < bestc) {
             bestc = c;
