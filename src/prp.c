@@ -318,9 +318,11 @@ static void careful_mul(prp_state *s, kite_num *x, const kite_num *a, const kite
     s->careful++;
 }
 
-// More careful redos than this in one round (B*M squarings, ~830K at n = 3.3M) and the test
-// moves to a longer FFT: 32 replays of at most 32 squarings each cost ~0.15% of a round.
-#define CAREFUL_PER_ROUND 32
+// A careful redo costs ~22 squarings (a replay of 16 on average plus ~6 for the operation), so
+// more than B*M/1100 in one round cost more than 2% of the round and the test moves to a longer
+// FFT. A flat 32 moved tests up at ~0.1% cost: near the limit the redos come evenly, ~200 per
+// million squarings at 64K 0.20 bits per word past the fit (2026-10-18).
+#define CAREFUL_COST_DIV 1100
 
 static int over(const prp_state *s) { return kite_max_roundoff(s->ctx) > s->maxround; }
 
@@ -427,6 +429,8 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
         if (B > 2000) B = 2000;
     }
     uint32_t M = o.gerbicz_blocks ? o.gerbicz_blocks : (B / 4 > 8 ? B / 4 : 8);
+    uint32_t careful_limit = o.careful_per_round ? o.careful_per_round
+                                                 : (uint32_t)((uint64_t)B * M / CAREFUL_COST_DIV) + 8;
     double maxround = o.max_roundoff > 0 ? o.max_roundoff : 0.40;
     double ck_secs = o.checkpoint_secs > 0 ? o.checkpoint_secs : 600;
     double u_secs = o.unverified_secs > 0 ? o.unverified_secs : 60;
@@ -579,7 +583,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
             // the block boundary, with x, d and t carried over unverified. d is the product of
             // every block's x since the start, so the next check covers the squarings before
             // the move too, as for a resume from the unverified checkpoint.
-            if (s.careful - careful0 > (o.careful_per_round ? o.careful_per_round : CAREFUL_PER_ROUND)) {
+            if (s.careful - careful0 > careful_limit) {
                 uint32_t L = kite_fft_len(s.ctx);
                 kite_opts fo = o.fft;
                 fo.fft_len = kite_next_fft_len(L + L / 25);

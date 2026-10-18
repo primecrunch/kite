@@ -2094,3 +2094,40 @@ A guard: more than 32 careful redos in one round move the test up a length at th
 boundary, x, d and t carried over unverified (the next check covers them, as for an unverified
 checkpoint). `--careful-limit 2` on 2007·2^432901−1 moved it from 28800 to 30720 after 5 careful
 redos, residue correct. New ctest `edge_careful` runs both; suite 23/23.
+
+## 2026-10-18 19:15 — 0.1.12: lengths past the fit, where careful redos stay cheap
+
+With careful redos the right limit is where they stop being cheap, not "max error ≤ 0.25".
+Complete tests at bpw = fit + δ with `--fft L`, careful redos counted, every residue compared
+with a run at a comfortable length (`docs/results/roundoff-delta-sweep-2026-10-18.md`, 42
+tests, all correct):
+
+| L | k | last δ with no careful failure | first δ where a careful redo fails |
+|---|---|--:|--:|
+| 28K | 2007 | +0.05 | +0.10 |
+| 48K | 6767 | +0.15 | +0.20 |
+| 64K | 2007 / 6767 | +0.20 | +0.25 |
+| 96K | 6119 | +0.15 | +0.20 |
+| 128K | 4813 | +0.15 | +0.20 |
+
+Near the limit the redos come evenly, not in a burst (64K +0.20: 33 between iterations 6198
+and 164404, ~200 per million squarings, ~0.4% of the time), so the flat 32-per-round guard moved
+tests up at a fraction of a percent. The guard is now cost-based: B·M/1100 + 8 redos per round
+(~2% of the round at ~22 squarings each); a failed careful redo still moves up at once. Same
+64K case: 162 careful redos, then one failed and it moved up; residue correct (5FA40A8A6F27F45A).
+
+The deciding case, 4813·2^5500155−1 at 400K (+0.13): RES64 D6321DD51FA5FB38 (matches), no FFT
+retry, 349 careful redos (0.14% of the test), 1179.5 µs per squaring on one M4 Pro core
+against PRST's 1333 and kite's 1453 at 432K.
+
+`kite_edge_bpw` = fit + δ(L), δ = 0.05 below 40K, 0.10 to 160K, 0.15 from 160K, a notch inside
+the failures above. New lengths: 4813·2^5500155−1 432K → 400K (PRST: 400K), 999·2^4000000−1
+288K → 270K (PRST: 288K; complete test on the M4 at 0.82–0.85 ms per squaring against PRST's
+0.86 alone).
+
+The suite caught one bug before the commit: a search-and-replace turned the new `allowed()`
+helper's conservative branch into a call to itself, so every conservative length choice (proof
+products, LLR, `kite time`) looped forever while the Fermat test's edge choice worked. The two
+proof tests hung at 100% CPU until killed (SIGKILL: the loop never reads the stop flag). Fixed
+before anything was committed; the suite now runs with `--timeout 1200`.
+999·2^4000000−1 at 270K on the M4 with `kite-prst` defaults: RES64 BBAD057C725281B3 (matches), 3267 s. Version 0.1.12.

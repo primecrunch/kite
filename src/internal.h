@@ -85,6 +85,7 @@ uint32_t kite_tuned_plan_order(uint32_t L);
 int kite_residue_nm1(uint64_t *y, const uint64_t *N, size_t n, uint64_t base);
 double kite_safe_bpw(uint32_t L, uint64_t k);
 double kite_fit_bpw(uint32_t L, uint64_t k);
+double kite_edge_bpw(uint32_t L, uint64_t k);
 // Layout helpers shared by the backends (exact rational arithmetic in T').
 uint64_t kite_s_at(const kite_ctx *ctx, uint64_t j);
 double kite_weight(const kite_ctx *ctx, uint64_t j, uint64_t sj);

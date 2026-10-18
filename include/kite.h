@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define KITE_VERSION "0.1.11"
+#define KITE_VERSION "0.1.12"
 
 typedef struct kite_ctx kite_ctx;
 typedef struct kite_num kite_num;
@@ -94,7 +94,7 @@ typedef struct {
     void *progress_arg;
     uint64_t inject_fault_at;  // testing: corrupt the state at this iteration (0 = never)
     // More careful redos than this in one Gerbicz round move the test to a longer FFT at the
-    // next block boundary (0 = 32).
+    // next block boundary (0 = B*M/1100 + 8: their cost passing ~2% of the round).
     uint32_t careful_per_round;
     // Proof points: ascending iteration positions (0..n) at which x_i is reported through
     // on_point, once a Gerbicz check (or the doubled tail) has verified it, or with an

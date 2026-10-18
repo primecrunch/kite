@@ -36,6 +36,13 @@ double kite_fit_bpw(uint32_t L, uint64_t k) {
 }
 double kite_safe_bpw(uint32_t L, uint64_t k) { return kite_fit_bpw(L, k) - BPW_MARGIN; }
 
+// How far past the fit kite_prp's careful redos stay cheap. Complete tests at fit + delta
+// (2026-10-18, careful redos counted, every residue checked): 28K +0.05 (+0.10: a careful redo
+// fails), 48K +0.15, 64K +0.20, 96K +0.15, 128K +0.15 (+0.20 fails), and 4813*2^5500155-1 at 400K
+// (+0.13) ran with 349 careful redos and none failed. Each step is a notch inside the failures.
+static double edge_delta(uint32_t L) { return L < 40960 ? 0.05 : L < 163840 ? 0.10 : 0.15; }
+double kite_edge_bpw(uint32_t L, uint64_t k) { return kite_fit_bpw(L, k) + edge_delta(L); }
+
 // Measured squaring times (us) per FFT length, loaded from a tuning file with
 // lines "L us [order]" (see `kite tune`; order as kite_opts.plan_order bits,
 // 0 if absent). Path: $KITE_FFT_TIMES, else ~/.kite/fft_times.txt, else the
@@ -129,22 +136,27 @@ static double cost_model(uint32_t L) {
 
 static bool len_usable(uint32_t L) { return L % 64 == 0 && kite_fft_len_ok(L); }
 
-static uint32_t choose_len(uint64_t k, uint64_t n, double margin, double room);
+static uint32_t choose_len(uint64_t k, uint64_t n, int edge, double margin, double room);
 
-uint32_t kite_choose_fft_len(uint64_t k, uint64_t n) { return choose_len(k, n, BPW_MARGIN, 0.25); }
-uint32_t kite_choose_fft_len_edge(uint64_t k, uint64_t n) { return choose_len(k, n, 0, 0); }
+uint32_t kite_choose_fft_len(uint64_t k, uint64_t n) { return choose_len(k, n, 0, BPW_MARGIN, 0.25); }
+uint32_t kite_choose_fft_len_edge(uint64_t k, uint64_t n) { return choose_len(k, n, 1, 0, 0); }
 
-static uint32_t choose_len(uint64_t k, uint64_t n, double margin, double room) {
+// bits per word allowed at L: the fit less margin, or kite_edge_bpw
+static double allowed(uint32_t L, uint64_t k, int edge, double margin) {
+    return edge ? kite_edge_bpw(L, k) : kite_fit_bpw(L, k) - margin;
+}
+
+static uint32_t choose_len(uint64_t k, uint64_t n, int edge, double margin, double room) {
     if (n < 2048) {
         // tiny numbers (reference backend): short power-of-two lengths
         for (uint32_t L = 16; L <= n; L *= 2) {
-            if ((double)n / L <= kite_fit_bpw(L, k) - margin) return L;
+            if ((double)n / L <= allowed(L, k, edge, margin)) return L;
         }
         return 0;
     }
     uint32_t Lmin = 0;
     for (uint32_t L = 64; L && L < (1u << 28); L += 64) {
-        if (len_usable(L) && (double)n / L <= kite_fit_bpw(L, k) - margin) {
+        if (len_usable(L) && (double)n / L <= allowed(L, k, edge, margin)) {
             Lmin = L;
             break;
         }
@@ -168,11 +180,11 @@ static uint32_t choose_len(uint64_t k, uint64_t n, double margin, double room) {
     }
     for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
         if (!len_usable(L) || (measured && measured_us(L) < 0)) continue;
-        if ((double)n / L <= kite_fit_bpw(L, k) - margin - ROOM) roomy = 1;
+        if ((double)n / L <= allowed(L, k, edge, margin) - ROOM) roomy = 1;
     }
     for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
         if (!len_usable(L) || (measured && measured_us(L) < 0)) continue;
-        if (roomy && (double)n / L > kite_fit_bpw(L, k) - margin - ROOM) continue;
+        if (roomy && (double)n / L > allowed(L, k, edge, margin) - ROOM) continue;
         double c = measured ? measured_us(L) : cost_model(L);
         if (c < bestc) {
             bestc = c;
