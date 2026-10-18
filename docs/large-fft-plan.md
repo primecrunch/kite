@@ -163,3 +163,17 @@ The cumulative figures for eagle at 256K, 10 tests, are estimates except step 1:
 
 Reaching the goal (+15%) on eagle probably needs every step. On wolf, steps 1 and 2 alone should
 put kite well ahead, as it already is level there with all the tables in place.
+
+## Status (2026-10-18, 0.1.9)
+
+- Step 0: done. `tools/load-bench.sh`, `tests/large_fft_cases.csv`, results in `docs/results/`.
+- Step 1: done. The table cut-off is FFT 96K, from the sweep on both machines: +28–39%
+  (M4) and +19–26% (M4 Pro) at n = 3.32M with every core busy.
+- Step 2: generated twiddles measured and dropped (6% slower alone, 2–4% under load).
+- Step 3: two-chain compressed normaliser measured and dropped (0–2%).
+- Step 4: done in part. Refitted cost model plus 0.25 bits per word of round-off room;
+  400K for the largest case is unsafe for kite.
+- Steps 5 and 6: not started.
+
+kite is at 0.85–1.00× PRST with every core busy at n ≥ 2.3M. The remaining areas and how to
+bound each are in `docs/next-investigations.md`.

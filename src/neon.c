@@ -105,6 +105,11 @@ typedef struct {
     double B[16], IB[16], IBs[16];
     double *nconsts;   // asm normaliser constants (see gen_norm)
     double *ntab;      // table-driven normaliser records (NULL = compressed)
+    // pattern records: the table's records with A and IA divided out, one per distinct pair of
+    // row masks (a few dozen), and the record index of each row pair [g*(R/2) + r/2]
+    double *prec;      // NTAB_PAIR doubles per record (NULL = none)
+    uint32_t *pidx;
+    uint32_t nprec;
     double base_small, ibase_small;  // 2^b, 2^-b
     double scale;                    // k / (4H)
     uint32_t bsmall;
@@ -432,19 +437,78 @@ static inline dinfo digit_info(const neon_state *st, uint32_t g, uint32_t r, uin
 #define s_at kite_s_at
 #define weight_at kite_weight
 
-// Table-driven normaliser: 48 bytes per element against 3 for the compressed weights. It saves
-// FP work (11% of a squaring alone at FFT 240K) and costs cache: with every core running a test
-// (how primecrunch runs kite), it wins up to FFT 64K and loses from 120K on both an M4 (4P + 6E)
-// and an M4 Pro (10P + 4E), by up to 24% at 256K on the M4; 90K is level within 3%
-// (docs/results/ntab-sweep-2026-10-17.md). Up to 0.1.8 the cut-off was H <= 2^17 (FFT 256K),
-// set from one test alone. KITE_NTAB=on|off overrides (KITE_NO_NTAB=1 is the old spelling of off).
+// Table-driven normaliser: 48 bytes per element. The pattern records (build_patterns) give the
+// same digits from 26 KB, at 1-2% more FP work alone and 4-9% less time with every core busy at
+// FFT 45K-90K on an M4 and an M4 Pro (7% at 256K on the M4), so the full table is off by
+// default; KITE_NTAB=on brings it back (for measurement). KITE_NO_NTAB=1 is the old spelling
+// of off.
 static int ntab_policy(const kite_ctx *ctx, uint32_t H) {
     const char *e = getenv("KITE_NTAB");
     (void)ctx;
+    (void)H;
     if (getenv("KITE_NO_NTAB")) return 0;
-    if (e && !strcmp(e, "on")) return 1;
-    if (e && !strcmp(e, "off")) return 0;
-    return H <= 49152;
+    return e && !strcmp(e, "on");
+}
+
+// Pattern records for the normaliser (see gen_norm_pat). A row pair's table record is
+// {IA*IBs[i]*2^e, 2^-(b+big), A*B[i]*2^-e*base} per digit and lane; with IA and A divided out
+// it depends only on the two rows' masks, of which there are at most 34 distinct pairs at the
+// production sizes (FFT 32K-432K). Returns -1 only if allocation fails; more than PREC_MAX
+// distinct pairs leaves prec NULL (compressed path).
+#define PREC_MAX 4096
+static int build_patterns(neon_state *st) {
+    if (getenv("KITE_NO_PAT")) return 0;
+    uint32_t R = st->R;
+    size_t np = (size_t)st->ngroups * (R / 2), cap = 2 * PREC_MAX;
+    uint64_t *k0 = malloc(cap * 8), *k1 = malloc(cap * 8);
+    uint32_t *slot = malloc(cap * 4);
+    st->pidx = malloc(np * sizeof(uint32_t));
+    st->prec = kite_alloc((size_t)PREC_MAX * NTAB_PAIR * sizeof(double));
+    if (!k0 || !k1 || !slot || !st->pidx || !st->prec) goto fail;
+    for (size_t h = 0; h < cap; h++) slot[h] = UINT32_MAX;
+    uint32_t n = 0;
+    for (size_t q = 0; q < np; q++) {
+        uint32_t g = (uint32_t)(q / (R / 2)), r = 2 * (uint32_t)(q % (R / 2));
+        uint64_t m0 = st->mask[(size_t)g * R + r], m1 = st->mask[(size_t)g * R + r + 1];
+        size_t h = (m0 * 0x9E3779B97F4A7C15ull ^ m1 * 0xC2B2AE3D27D4EB4Full) & (cap - 1);
+        while (slot[h] != UINT32_MAX && !(k0[h] == m0 && k1[h] == m1)) h = (h + 1) & (cap - 1);
+        if (slot[h] == UINT32_MAX) {
+            if (n == PREC_MAX) {  // not expected: fall back to the compressed path
+                kite_free_aligned(st->prec);
+                free(st->pidx);
+                st->prec = NULL;
+                st->pidx = NULL;
+                break;
+            }
+            k0[h] = m0;
+            k1[h] = m1;
+            slot[h] = n;
+            double *t = st->prec + (size_t)n * NTAB_PAIR;
+            for (uint32_t i = 0; i < 16; i++) {
+                for (uint32_t l = 0; l < 2; l++) {
+                    uint64_t m = l ? m1 : m0;
+                    double e2 = (m >> i) & 1 ? 0.5 : 1.0;
+                    double base = (m >> (16 + i)) & 1 ? 2 * st->base_small : st->base_small;
+                    t[0 + l] = st->IBs[i] / e2;
+                    t[2 + l] = 1.0 / base;
+                    t[4 + l] = base * (st->B[i] * e2);
+                }
+                t += 6;
+            }
+            n++;
+        }
+        st->pidx[q] = slot[h];
+    }
+    st->nprec = st->prec ? n : 0;
+    free(k0);
+    free(k1);
+    free(slot);
+    return 0;
+fail:
+    free(k0);
+    free(k1);
+    free(slot);
+    return -1;
 }
 
 static int neon_init_impl(kite_ctx *ctx, int sme);
@@ -565,6 +629,8 @@ static int neon_init_impl(kite_ctx *ctx, int sme) {
         }
     }
 
+    if (!st->ntab && build_patterns(st)) return -1;
+
     // pass 2 tables
     st->partner = malloc(R * sizeof(uint32_t));
     st->rs = kite_alloc(2 * R * sizeof(double));
@@ -617,6 +683,8 @@ static void neon_free(kite_ctx *ctx) {
     kite_free_aligned(st->mask);
     kite_free_aligned(st->nconsts);
     kite_free_aligned(st->ntab);
+    kite_free_aligned(st->prec);
+    free(st->pidx);
     free(st->partner);
     kite_free_aligned(st->rs);
     kite_free_aligned(st->cs);
@@ -814,6 +882,26 @@ static void norm_rows(kite_ctx *ctx, neon_state *st, double *d, double *carr, ui
             double e2 = fns[mode][1][err]((double *)((char *)gb + done * 2 * st->rowstride),
                                           st->rowstride, 1, carr + r0 + 2 * done,
                                           t + done * NTAB_PAIR, NULL, NULL, NULL);
+            if (e2 > e) e = e2;
+        }
+    } else if (st->prec) {
+        // two row pairs (four carry chains) per call, one for an odd pair left over
+        typedef double (*pat_fn)(double *, size_t, size_t, double *, const double *,
+                                 const double *, const uint32_t *, const double *);
+        static const pat_fn vfns[3][2] = {
+            {kite_norm_av, kite_norm_ave}, {kite_norm_bv, kite_norm_bve}, {kite_norm_cv, kite_norm_cv}};
+        static const pat_fn ufns[3][2] = {
+            {kite_norm_au, kite_norm_aue}, {kite_norm_bu, kite_norm_bue}, {kite_norm_cu, kite_norm_cu}};
+        const uint32_t *pi = st->pidx + (size_t)g * (st->R / 2) + r0 / 2;
+        size_t np = (r1 - r0) / 2, nv = np & ~(size_t)1;
+        e = 0;
+        if (nv) e = vfns[mode][err](gb, st->rowstride, nv, carr + r0, st->A + idx, st->IA + idx,
+                                    pi, st->prec);
+        if (np - nv) {
+            size_t o = 2 * nv;
+            double e2 = ufns[mode][err]((double *)((char *)gb + o * st->rowstride), st->rowstride,
+                                        1, carr + r0 + o, st->A + idx + o, st->IA + idx + o,
+                                        pi + nv, st->prec);
             if (e2 > e) e = e2;
         }
     } else {

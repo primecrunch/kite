@@ -1928,3 +1928,51 @@ What is left at production sizes, in order of size:
 
 Blog material: the same table that made kite 1.25× faster than PRST at FFT 48K made it 1.5×
 slower at 256K, and only with every core busy. A benchmark of one test alone could not see it.
+
+## 2026-10-18 09:20 — Three areas left at production sizes
+
+`docs/next-investigations.md` writes up what is left between 0.1.9 and PRST with every core
+busy: FFT round-off (kite needs 432K where PRST runs 400K), the compressed normaliser's op count
+(5–11% alone), and the four-step twiddle table. Each has a bound to measure before any code.
+
+One new measurement for the round-off section: every max error seen is a short dyadic fraction
+(0.375 = 3/8, 0.3125 = 5/16, 0.15625 = 5/32, ...), so the value being rounded has an ulp of 1/32
+to 1/128. The error is set by how close the convolution outputs come to 2^53, not by noise
+through the stages. The tangent-form twiddles are not the cause: `KITE_NO_TAN=1` gives the same
+0.375 at 400K for 4813·2^5500155−1. The first question for that area is what gwnum's own max
+round-off is at the same length and bits per word, which separates a calibration difference
+from an accuracy one.
+
+## 2026-10-18 10:05 — Pattern records: the table normaliser's speed in 26 KB
+
+Bounds first, at production sizes with every core busy (`kite throughput`, two rounds):
+
+- **Four-step twiddle traffic.** A wrong build pointing every pass-1 group at group 0's twiddle
+  slice (same FP work, ~16 KB of twiddles instead of 2–3.4 MB) gains 3.6–6.2% at 10 tests on
+  the M4 (240K–432K) and 0–10.6% at 14 on the M4 Pro (round-to-round spread ~10% there).
+  Generating twiddles costs ~2 vector ops per element against ~60 for the rest of a squaring
+  (the 6% measured earlier), so this area nets 0–4% at best.
+- **Phase profile, M4, 256K, 1 → 10 tests** (µs per squaring): p1 inverse 133 → 302 (2.27×),
+  normalise 181 → 297 (1.64×), p1 forward 124 → 231, p2 rows in 42 → 112 (2.69×), p2 forward
+  110 → 205, split 71 → 117 (1.64×), p2 inverse 94 → 196, rows out 37 → 78; total 796 → 1549.
+  The FP-bound phases slow 1.64× (clocks and E-cores); the excess elsewhere, ~240 µs, is memory.
+- **Software prefetch** of the next pass-1 group's rows and twiddles: no change at 10 tests
+  (1.59–1.62 against 1.59–1.60 ms), 2% slower alone. Dropped.
+
+The profile also showed that alone, at 256K, the compressed normaliser takes 190 µs against
+the table's 101: most of kite's 10% single-test gap to PRST.
+
+The table's record for a row pair, {IA·IBs[i]·2^e, 2^−(b+big), A·B[i]·2^−e·base} per digit and
+lane, depends on the rows only through A, IA and the two rows' masks. Divided by IA and A, it
+depends only on the masks, and there are at most 34 distinct (mask[r], mask[r+1]) pairs at
+FFT 32K–432K (8 at 64K, 34 at 160K and up): the digit sizes follow the Sturmian pattern of
+ceil(j·T'/L), so a window of 16 has few distinct shapes. So: 34 records of 768 bytes (26 KB),
+a 4-byte record index per row pair, and a kernel (`gen_norm_pat`) that multiplies osc by IA and
+bw by A. Those are power-of-two scalings of the table's products, so the digits are bit for bit
+the table path's (same residues, same max error).
+
+256K, one core: table 102 µs, patterns 113, compressed 190; a squaring 0.725, 0.727 and
+0.800 ms. On the M4 at 10 tests (6767·2^3322174−1): 1.526/1.549 ms (0.1.9) → 1.429/1.425
+(−7%). At 45K–90K, patterns against the table on the M4: 1–2% slower alone, 4–9% faster at 10
+tests (0.235 → 0.225, 0.317 → 0.300, 0.514 → 0.470 ms), so the pattern path can replace the
+table at every size.

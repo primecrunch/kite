@@ -783,6 +783,124 @@ def gen_norm_tab(g, mode, err, P):
     E("ret")
 
 
+def gen_norm_pat(g, mode, err, P):
+    """gen_norm_tab with the per-row factors taken out of the table. A row pair's record (same
+    layout as the table's: per digit {osc[2], ib[2], bw[2]}) depends only on the pair's e and
+    big flags, which take at most a few dozen distinct values per number, so the records are a
+    small table indexed per pair, and the kernel multiplies osc by the rows' IA and bw by their
+    A. osc = IA * (IBs[i]*2^e) and bw = A * (B[i]*2^-e*base) are power-of-two scalings of the
+    table's products, so every digit is bit for bit the table path's.
+
+    double kite_norm_{a,b,c}{u,v}[e](double *gbase, size_t rowstride, size_t npairs,
+                                     double *carry, const double *A, const double *IA,
+                                     const uint32_t *pidx, const double *recs)
+    P = 1 (u) or 2 (v) row pairs per iteration; npairs must be a multiple of P. A and IA
+    advance one pair (16 bytes) per pair, pidx one index per pair; record = recs + 768*index."""
+    sfx = {1: "u", 2: "v"}[P]
+    name = "%snorm_%s%s%s" % (PREFIX, mode, sfx, "e" if err else "")
+    g.out.append("")
+    g.out.append(".globl %s" % name)
+    g.out.append(".p2align 5")
+    g.label(name)
+    g.out.append(SAVE)
+    E = g.emit
+    rowregs = ["x0", "x9", "x10", "x11"][:2 * P]
+    E("movi v28.2d, #0")  # max error
+    for i in range(1, 2 * P):
+        E("add %s, %s, x1" % (rowregs[i], rowregs[i - 1]))
+    E("lsl x1, x1, #%d" % {1: 1, 2: 2}[P])  # advance 2P rows
+    if P > 1:
+        E("lsr x2, x2, #1")
+    recregs = ["x14", "x15"][:P]
+    cins = [16 + p for p in range(P)]
+    AREG = [8 + p for p in range(P)]       # A of pair p (lanes = rows)
+    IAREG = [10 + p for p in range(P)]     # IA of pair p
+    STG = (20, 21, 22, 23)
+    OSC, IB, BW, T, EV = 24, 25, 26, 27, 29
+    g.label("1")
+    if P == 1:
+        E("ldr q16, [x3]")
+        E("ldr q%d, [x4], #16" % AREG[0])
+        E("ldr q%d, [x5], #16" % IAREG[0])
+        E("ldr w14, [x6], #4")
+    else:
+        E("ldp q16, q17, [x3]")
+        E("ldp q%d, q%d, [x4], #32" % (AREG[0], AREG[1]))
+        E("ldp q%d, q%d, [x5], #32" % (IAREG[0], IAREG[1]))
+        E("ldp w14, w15, [x6], #8")
+    for r in recregs:  # record = recs + 768*index = recs + ((index*3) << 8)
+        E("add %s, %s, %s, lsl #1" % (r, r, r))
+        E("add %s, x7, %s, lsl #8" % (r, r))
+    for lg in range(4):
+        for p in range(P):
+            r0, r1 = rowregs[2 * p], rowregs[2 * p + 1]
+            a, b, c, d = STG
+            E("ldr q%d, [%s, #%d]" % (a, r0, 16 * lg))
+            E("ldr q%d, [%s, #%d]" % (b, r0, 64 + 16 * lg))
+            E("ldr q%d, [%s, #%d]" % (c, r1, 16 * lg))
+            E("ldr q%d, [%s, #%d]" % (d, r1, 64 + 16 * lg))
+            D = [4 * p + k for k in range(4)]
+            E("trn1 v%d.2d, v%d.2d, v%d.2d" % (D[0], a, c))
+            E("trn1 v%d.2d, v%d.2d, v%d.2d" % (D[1], b, d))
+            E("trn2 v%d.2d, v%d.2d, v%d.2d" % (D[2], a, c))
+            E("trn2 v%d.2d, v%d.2d, v%d.2d" % (D[3], b, d))
+        for k in range(4):
+            i = 4 * lg + k
+            last = mode == "c" and i == 15
+            for p in range(P):
+                Dk, cin = 4 * p + k, cins[p]
+                rp, off = recregs[p], i * 48
+                if mode != "c":
+                    E("ldp q%d, q%d, [%s, #%d]" % (OSC, IB, rp, off))
+                    E("fmul v%d.2d, v%d.2d, v%d.2d" % (OSC, OSC, IAREG[p]))
+                else:
+                    E("ldr q%d, [%s, #%d]" % (IB, rp, off + 16))
+                if mode != "b":
+                    E("ldr q%d, [%s, #%d]" % (BW, rp, off + 32))
+                    E("fmul v%d.2d, v%d.2d, v%d.2d" % (BW, BW, AREG[p]))
+                if mode != "c":
+                    E("fmul v%d.2d, v%d.2d, v%d.2d" % (Dk, Dk, OSC))
+                    if err:
+                        E("frintn v%d.2d, v%d.2d" % (T, Dk))
+                        E("fabd v%d.2d, v%d.2d, v%d.2d" % (EV, Dk, T))
+                        E("fmax v28.2d, v28.2d, v%d.2d" % EV)
+                        E("fmul v%d.2d, v%d.2d, v%d.2d" % (Dk, T, IB))
+                    else:
+                        E("frintn v%d.2d, v%d.2d" % (Dk, Dk))
+                        E("fmul v%d.2d, v%d.2d, v%d.2d" % (Dk, Dk, IB))
+                E("fmla v%d.2d, v%d.2d, v%d.2d" % (Dk, cin, IB))
+                if last:
+                    E("movi v%d.2d, #0" % cin)
+                else:
+                    E("frintn v%d.2d, v%d.2d" % (cin, Dk))
+                    E("fsub v%d.2d, v%d.2d, v%d.2d" % (Dk, Dk, cin))
+                if mode != "b":
+                    E("fmul v%d.2d, v%d.2d, v%d.2d" % (Dk, Dk, BW))
+        for p in range(P):
+            r0, r1 = rowregs[2 * p], rowregs[2 * p + 1]
+            a, b, c, d = STG
+            D = [4 * p + k for k in range(4)]
+            E("trn1 v%d.2d, v%d.2d, v%d.2d" % (a, D[0], D[2]))
+            E("trn1 v%d.2d, v%d.2d, v%d.2d" % (b, D[1], D[3]))
+            E("trn2 v%d.2d, v%d.2d, v%d.2d" % (c, D[0], D[2]))
+            E("trn2 v%d.2d, v%d.2d, v%d.2d" % (d, D[1], D[3]))
+            E("str q%d, [%s, #%d]" % (a, r0, 16 * lg))
+            E("str q%d, [%s, #%d]" % (b, r0, 64 + 16 * lg))
+            E("str q%d, [%s, #%d]" % (c, r1, 16 * lg))
+            E("str q%d, [%s, #%d]" % (d, r1, 64 + 16 * lg))
+    if P == 1:
+        E("str q16, [x3], #16")
+    else:
+        E("stp q16, q17, [x3], #32")
+    for r in rowregs:
+        E("add %s, %s, x1" % (r, r))
+    E("subs x2, x2, #1")
+    E("b.ne 1b")
+    E("fmaxp d0, v28.2d")
+    g.out.append(RESTORE)
+    E("ret")
+
+
 def gen_rows(g):
     """void kite_rows_in(const double *rp, const double *rpp, double *scr, size_t C)
        void kite_rows_out(double *rp, double *rpp, const double *scr, size_t C)
@@ -1215,6 +1333,8 @@ def main():
             gen_norm(g, mode, err)
             for P in (1, 2, 4):
                 gen_norm_tab(g, mode, err, P)
+            for P in (1, 2):
+                gen_norm_pat(g, mode, err, P)
     write(outdir, "norm.S", g)
     g = Gen()
     gen_rows(g)

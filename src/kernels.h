@@ -69,6 +69,22 @@ KITE_NORM(bo)
 KITE_NORM(boe)
 KITE_NORM(co)
 #undef KITE_NORM
+// table records shared by row pairs with the same flags, indexed per pair (gen_norm_pat)
+#define KITE_NORM_PAT(m)                                                                     \
+    double kite_norm_##m(double *gbase, size_t rowstride, size_t npairs, double *carry,     \
+                        const double *A, const double *IA, const uint32_t *pidx,           \
+                        const double *recs);
+KITE_NORM_PAT(au)
+KITE_NORM_PAT(aue)
+KITE_NORM_PAT(bu)
+KITE_NORM_PAT(bue)
+KITE_NORM_PAT(cu)
+KITE_NORM_PAT(av)
+KITE_NORM_PAT(ave)
+KITE_NORM_PAT(bv)
+KITE_NORM_PAT(bve)
+KITE_NORM_PAT(cv)
+#undef KITE_NORM_PAT
 
 void kite_rows_in(const double *rp, const double *rpp, double *scr, size_t C);
 void kite_rows_out(double *rp, double *rpp, const double *scr, size_t C);
