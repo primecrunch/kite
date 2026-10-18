@@ -70,10 +70,25 @@ sh kite-bench.sh
 | M4 Pro (10P+4E), quiet, 2026-10-16 | Fermat 9357·2^650001−1 | 91.3 s / 73.1 s | 345/h / 410/h (14 tests) | 1.25× alone, 1.19× all cores |
 | | LLR 4299·2^522773−1 | 131.6 s / 47.9 s | 237/h / 655/h (14 tests) | 2.75× alone, 2.76× all cores |
 
-At primecrunch's current sizes (n ≈ 2.3M–5.5M, FFT 160K–432K) kite 0.1.9 is level with PRST
-with only the P-cores busy and 0–15% behind with every core busy: 0.90× and 0.95× at
-2009·2^3322280−1 on an M4 and an M4 Pro (`tools/load-bench.sh`,
-`docs/results/load-bench-2026-10-18-*.md`, `docs/large-fft-plan.md`).
+That table is at n ≈ 650K. At primecrunch's current sizes, with every core busy (one test per
+core, as primecrunch runs), `tools/load-bench.sh` gives kite against PRST in tests per hour
+(0.1.10, 2026-10-18; `docs/results/load-bench-2026-10-18-*-0.1.10*.md`):
+
+| Test | kite FFT / PRST FFT | M4 (4P + 6E), 10 tests | M4 Pro (10P + 4E), 14 tests |
+|---|---|--:|--:|
+| 1021·2^2300003−1 | 160K / 160K | 1.02× | 1.13× |
+| 6073·2^2290815−1 | 175K / 192K | 1.06× | 1.10× |
+| 2009·2^3322280−1 | 240K / 240K | 0.99× | 1.01× |
+| 6767·2^3322174−1 | 256K / 256K | 0.96× | 0.99× |
+| 999·2^4000000−1 | 288K / 288K | 1.01× | 1.03× |
+| 6119·2^4838048−1 | 384K / 384K | 0.97× | 1.00× |
+| 4813·2^5500155−1 | 432K / 400K | 0.89× | 0.94× |
+
+The M4 Pro column is ABBA (kite, PRST, PRST, kite), since its clocks fall ~30% over minutes of
+full load. With 0.1.8 the same rows were 0.65–0.93×: the normaliser's 6 MB table did not fit the
+cache with a test on every core (`docs/large-fft-plan.md`). PRST is ahead where gwnum runs a
+shorter FFT: it runs ~0.3 bits per word closer to the round-off limit, not with a more accurate
+transform (journal, 2026-10-18).
 
 PRST 14.0.1888 runs under Rosetta. On LLR kite does half the work for a prime: PRST computes
 the Lucas U and V sequences together so that a Gerbicz–Li check can verify them, kite computes
@@ -113,7 +128,10 @@ GPU prototype (`gpu/`, on hold): `gpu/gpu_prp.m` runs complete Gerbicz-checked t
 alongside the CPU tests loses throughput: within a minute macOS caps the P-cores at 1800 MHz and
 ~5 W to give the GPU its power, and the combination sustains ~244 tests/hour against ~372 for the
 CPU alone. The +22% from 30 s squaring-rate samples measured the first minute, before the cap.
-It may still pay on a desktop with a bigger power budget.
+On a desktop it pays: an M4 Mac (4P + 6E, 10-core GPU) holds ~27 W for the package, and for
+25 minutes 9 CPU tests + the GPU gave 183 + 70 = 253 tests/hour against 224 for 10 CPU tests
+alone (+13%), P-cores 3460 → ~2920 MHz, thermal pressure Nominal throughout; 10 CPU tests + the
+GPU gave 179 + 67 = 246. The prototype has one length (32768), so production sizes are untested.
 
 ## Verified residues from primecrunch
 
@@ -163,21 +181,30 @@ Stages are radix 2/3/4/5/7/8, so lengths are 2^a·3^b·5^c·7^d·64.
 - DIF/DIT stage kernels per radix, with by-element twiddle FMAs and four-step-twiddle variants.
   DIT stages of radix 2/3/4/8 use a tangent form, w = c(1 + iτ): two FMAs per twiddle, with
   c folded into the butterfly's own FMAs (`KITE_NO_TAN=1` selects the plain complex multiply).
-- Normalisers: compressed-weight and table-driven variants. The table variants work each digit
-  in place from a {osc, 1/base, base·w} record, and the 8-row version keeps four carry chains
-  in flight to hide FP latency.
+- Normalisers work each digit in place from a {osc, 1/base, base·w} record, with several carry
+  chains in flight to hide FP latency. A row pair's record depends on its rows only through the
+  per-row weights A and IA and the rows' e/big-digit masks, and the masks take at most 34
+  distinct pairs at FFT 32K–432K (digit sizes follow ⌈jT/L⌉, so a 16-digit window has few
+  shapes). So the default (`gen_norm_pat`) keeps one record per distinct mask pair (~26 KB), an
+  index per row pair, and multiplies by IA and A as it goes: bit for bit the full table's
+  digits (`KITE_NTAB=on`, 48 bytes per element), which with a test on every core cost up to 24%
+  in cache misses at 256K.
 - Row transposes and the real-split kernel.
 
 At 4.49 GHz all of them run at about 4 FP instructions per cycle in isolation, the limit of the
 4 NEON pipes. In the full squaring the passes that load from L2 run lower; `KITE_PROF=1` prints a
 per-phase time split, and `tools/count_ops.py build/asm` counts each kernel's instructions.
 
-**FFT length** comes from a fitted round-off model. Measured: bpw_max ≈ 21.44 −
-0.305·(log2 L − 12) − 0.525·log2 k, less a 0.45 margin. Among the safe lengths, the fastest is
-taken from `~/.kite/fft_times.txt` (or `$KITE_FFT_TIMES`); without that file a heuristic is
-used. Each line is "L us order": `kite tune` times the four stage orders (column and row
-radices in the default order or ascending) and records the fastest, since which is faster
-depends on the length. `tune/fft_times_m4pro.txt` holds measurements for this machine.
+**FFT length** comes from a fitted round-off model: safe bits per word = 21.44 −
+0.305·(log2 L − 12) − 0.50·log2 k − 0.2 (`kite_safe_bpw`), the fit being "max error ≤ 0.25 over a
+few hundred squarings". Among the safe lengths up to 30% longer, the fastest measured one is
+taken, keeping 0.25 bits per word of room when any length in range has it (at the edge of the
+model the max error reaches ~0.3 within a few thousand squarings). Times come from
+`~/.kite/fft_times.txt` (or `$KITE_FFT_TIMES`), else from the built-in table
+(`src/fft_times_default.h`: `tune/fft_times_m4pro.txt` below 96K and `tune/fft_times_m4.txt` to
+640K, regenerated by `tools/gen_fft_times.sh`). Each line is "L us order": `kite tune` times the
+four stage orders (column and row radices in the default order or ascending) and records the
+fastest, since which is faster depends on the length; order 3 wins at most lengths from 256K.
 
 **Error checking** (`src/prp.c`):
 - A Gerbicz check every B·M squarings (B ≈ √n, M ≈ B/4), with rollback to the last verified
@@ -211,6 +238,18 @@ The 9001·2^662695−1 throughput rows are complete tests with checked residues 
 GPU path (`gpu/`) is a prototype on hold: a complete squaring mod k·2^n−1 (4-prime integer NTT,
 Garner CRT, Montgomery reduction with R = 2^n) with Gerbicz checks and checkpoints, at one
 transform length (32768).
+
+## Measured at production sizes (0.1.10)
+
+M4 (4P + 6E), one core, `kite time --iters 3000` (2026-10-18): 6767·2^3322174−1 at 256K 0.689 ms
+per squaring (stage order 3; order 0 0.719), 2009·2^3322280−1 at 240K 0.665 ms, 4813·2^5500155−1
+at 432K 1.267 ms. Phase split at 256K, µs per squaring, 1 → 10 tests: p1 inverse 133 → 302,
+normalise 113 (pattern records; 190 compressed, 102 full table), p1 forward 124 → 231, p2 rows
+in 42 → 112, p2 stages 110 + 94 → 205 + 196, split 71 → 117. The FP-bound phases slow 1.64× with
+every core busy (clocks and E-cores); the rest is memory.
+
+Every core busy, tests per hour (`tools/load-bench.sh`): M4 at 2009·2^3322280−1 8.3 (PRST
+8.4), 6767·2^3322174−1 7.8 (8.2); M4 Pro, sustained, 12.5 (12.4) and 11.1 (11.2).
 
 At n ≈ 370K, splitting a test across threads loses throughput (5×2 gives 892 tests/hour, 1×10
 gives 510), so run one test per core. For record sizes, run one test across all P-cores.

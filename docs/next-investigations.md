@@ -161,3 +161,42 @@ Every change is checked as 0.1.9 was:
 
 Round-off work in particular needs complete tests, not 2000-squaring samples, before any
 length changes.
+
+## Status, 2026-10-18 (0.1.10)
+
+Area 2 was solved differently from the ideas above: pattern records (`gen_norm_pat`) give the
+table path's digits from 26 KB, and kite with every core busy is now 0.96–1.06× PRST on the M4
+and 0.99–1.13× on the M4 Pro at n ≤ 4.8M (`journal.md`, 2026-10-18). Area 1 turned out to be a
+policy question, not accuracy: gwnum's limits sit on kite's fitted line without the 0.2 margin,
+worth ~2% net (journal, 11:30). Area 3 measured twice as a net loss. A smaller pass-1 group for
+the E-cores' 64 KB L1 did nothing (journal, 12:35).
+
+## 4. Engine choice per FFT size in the primecrunch client
+
+kite and PRST now trade wins by size: kite 1.13× at 160K on the M4 Pro, PRST 1.12× at 432K on the
+M4 (where it runs 400K and kite 432K). The client already calibrates the tests × threads split per
+FFT (`client/internal/benchmark/tuner.go`). Calibrating both engines per FFT the same way and
+running the faster one gives every Mac the better engine at every size, with no further engine
+work, and moves each size over to kite as kite improves.
+
+- Needs: kite 0.1.10 released and embedded; the client's hints file keyed by engine as well as
+  FFT; both engines' checkpoints stay readable only by their own engine, so a test keeps the
+  engine it started on.
+- Exit: on eagle and wolf, the client picks kite at 160K–288K and PRST at 432K, and its tests
+  per hour match the faster engine's within the calibration's noise.
+- A primecrunch change: needs Andy's go-ahead.
+
+## 5. The GPU on desktop Macs
+
+`gpu/gpu_prp.m` runs complete Gerbicz-checked tests at one length (32768): 173 tests/hour alone
+on the M4 Pro. On that laptop CPU + GPU lost (2026-10-12): within a minute macOS capped the
+P-cores at 1800 MHz and ~5 W to give the GPU its power, and 13 CPU tests + GPU sustained ~244
+tests/hour against ~372 for 14 CPU tests. A desktop (eagle, a Mac mini) has a larger power
+budget, so the GPU may add throughput on top of every CPU core.
+
+- First measurement (no new code): on eagle, 10 CPU tests alone against 9 CPU tests + the GPU
+  prototype at 32K, 25 minutes each with `powermetrics`, as the 2026-10-12 laptop runs.
+- Only if CPU + GPU wins there: lengths at production size (160K–432K), word size per n, and the
+  driver, before kite-prst could use it.
+- Exit: a measured sustained gain on a desktop, or a measured reason the GPU cannot add to the
+  CPU on Apple Silicon at these sizes.

@@ -2014,3 +2014,37 @@ clock drift under sustained load favours neither; `docs/results/load-bench-2026-
 1.13× (160K), 1.10× (175K against 192K), 1.01× (240K), 0.99× (256K), 1.03× (288K), 1.00× (384K),
 0.94× (432K against 400K). On both machines kite is now level with or ahead of PRST at n ≤ 4.8M
 with every core busy, and behind only where PRST runs a shorter length.
+
+## 2026-10-18 12:35 — Pass-1 group size and the E-core L1: no effect
+
+The sizes where kite trailed PRST most on the M4 with every core busy (256K 0.96×, 384K 0.97×,
+432K 0.89×) are the ones whose pass-1 group is 32 KB of data plus 32 KB of twiddles (R = 256),
+exactly an M4 E-core's 64 KB L1D; 240K and 288K (R = 192, 48 KB) were 0.99× and 1.01×. A cap on
+the group size in `choose_shape` (measurement switch, not kept), ABBA, 10 tests:
+- 16 KB groups: 256K 0.997 (128 × 1024), 384K 1.052, 432K 1.051 (worse: wider pass-2 rows);
+- 24 KB groups: 384K 1.010, 432K 1.009.
+The L2 hides the L1 overflow; the shape stays as it is.
+
+## 2026-10-18 13:30 — CPU + GPU on a desktop M4: +13%
+
+The 2026-10-12 laptop runs lost 35% with the GPU busy (macOS capped the P-cores at 1800 MHz and
+the package at ~20 W). Repeated on eagle, an M4 desktop (4P + 6E, 10-core GPU), 9001·2^662695−1,
+`kite throughput` for 1500 s, `gpu_prp` with 32 slots (the prototype's one length, 32768),
+`powermetrics` every 10 s:
+
+| Run | P MHz | CPU W | GPU W | Pressure | Tests/hour |
+|---|--:|--:|--:|---|--:|
+| 10 CPU tests | 3460 | 24.7 | 0.1 | Nominal | 223.8 |
+| 9 CPU tests + GPU | 2912–2930 | 18.0–18.2 | 8.7–9.1 | Nominal | 183.2 + 70 = 253.2 |
+
+The GPU batch was correct (all 32 slots RES64 0000000000000001, no Gerbicz errors, 1645 s,
+51.4 s per test). E-cores stayed at 2808 MHz. The desktop holds ~27 W for the package against
+24.7 W for the CPU alone, and gives the GPU ~9 W of it at a 16% P-core clock cost, steady for
+the whole run rather than collapsing as on the laptop. Net +13% at this size. It says nothing
+yet about production sizes: the prototype has one length, 16 times smaller than 256K.
+
+10 CPU tests + GPU on the same desktop: P-cores 2700–2733 MHz, CPU 16.0–16.2 W, GPU 9.6–9.7 W,
+Nominal. CPU 178.7 tests/hour (below 9 tests' 183.2: the tenth test only takes clock from the
+others), GPU 67 (32 slots correct, 1716.5 s), total 245.7. Best is 9 CPU tests + GPU: 253.2
+against 223.8 for the CPU alone. `gpu_prp` uses ~no CPU, but the power it takes comes out of the
+P-cores' clocks either way.
