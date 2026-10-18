@@ -34,7 +34,8 @@ double kite_safe_bpw(uint32_t L, uint64_t k) {
 
 // Measured squaring times (us) per FFT length, loaded from a tuning file with
 // lines "L us [order]" (see `kite tune`; order as kite_opts.plan_order bits,
-// 0 if absent). Path: $KITE_FFT_TIMES, else ~/.kite/fft_times.txt.
+// 0 if absent). Path: $KITE_FFT_TIMES, else ~/.kite/fft_times.txt, else the
+// built-in table from M4 and M4 Pro measurements (fft_times_default.h).
 static struct {
     int loaded;
     uint32_t n;
@@ -43,6 +44,26 @@ static struct {
     uint8_t *ord;
 } g_times;
 
+#include "fft_times_default.h"
+
+static void add_time(uint32_t L, double us, uint32_t ord, uint32_t *cap) {
+    if (g_times.n == *cap) {
+        *cap = *cap ? 2 * *cap : 256;
+        g_times.L = realloc(g_times.L, *cap * sizeof(uint32_t));
+        g_times.us = realloc(g_times.us, *cap * sizeof(double));
+        g_times.ord = realloc(g_times.ord, *cap);
+    }
+    g_times.L[g_times.n] = L;
+    g_times.ord[g_times.n] = (uint8_t)ord;
+    g_times.us[g_times.n++] = us;
+}
+
+static void load_default_times(void) {
+    uint32_t cap = 0;
+    for (size_t i = 0; i < sizeof kite_default_times / sizeof kite_default_times[0]; i++)
+        add_time(kite_default_times[i].L, kite_default_times[i].us, kite_default_times[i].ord, &cap);
+}
+
 static void load_times(void) {
     if (g_times.loaded) return;
     g_times.loaded = 1;
@@ -50,12 +71,16 @@ static void load_times(void) {
     const char *p = getenv("KITE_FFT_TIMES");
     if (!p) {
         const char *home = getenv("HOME");
-        if (!home) return;
-        snprintf(path, sizeof path, "%s/.kite/fft_times.txt", home);
-        p = path;
+        if (home) {
+            snprintf(path, sizeof path, "%s/.kite/fft_times.txt", home);
+            p = path;
+        }
     }
-    FILE *f = fopen(p, "r");
-    if (!f) return;
+    FILE *f = p ? fopen(p, "r") : NULL;
+    if (!f) {
+        if (!getenv("KITE_NO_DEFAULT_TIMES")) load_default_times();
+        return;
+    }
     uint32_t cap = 0, L, ord;
     double us;
     char line[256];
@@ -63,15 +88,7 @@ static void load_times(void) {
         int got = sscanf(line, "%u %lf %u", &L, &us, &ord);
         if (got < 2) continue;
         if (got < 3 || ord > 3) ord = 0;
-        if (g_times.n == cap) {
-            cap = cap ? 2 * cap : 256;
-            g_times.L = realloc(g_times.L, cap * sizeof(uint32_t));
-            g_times.us = realloc(g_times.us, cap * sizeof(double));
-            g_times.ord = realloc(g_times.ord, cap);
-        }
-        g_times.L[g_times.n] = L;
-        g_times.ord[g_times.n] = (uint8_t)ord;
-        g_times.us[g_times.n++] = us;
+        add_time(L, us, ord, &cap);
     }
     fclose(f);
 }
@@ -132,17 +149,22 @@ uint32_t kite_choose_fft_len(uint64_t k, uint64_t n) {
     // with the room it stays near 0.1 (30720: 0.08, 184320: 0.09)
     uint32_t best = Lmin;
     double bestc = 1e300;
-    int have_all = 1, roomy = 0;
+    // With measurements, only measured lengths are candidates (`kite tune` records every length
+    // the NEON backend can shape); without any in the range, the heuristic over all of them.
+    int measured = 0, roomy = 0;
     const double ROOM = 0.25;
     for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
         if (!len_usable(L)) continue;
-        if (measured_us(L) < 0) have_all = 0;
+        if (measured_us(L) >= 0) measured = 1;
+    }
+    for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
+        if (!len_usable(L) || (measured && measured_us(L) < 0)) continue;
         if ((double)n / L <= kite_safe_bpw(L, k) - ROOM) roomy = 1;
     }
     for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
-        if (!len_usable(L)) continue;
+        if (!len_usable(L) || (measured && measured_us(L) < 0)) continue;
         if (roomy && (double)n / L > kite_safe_bpw(L, k) - ROOM) continue;
-        double c = have_all ? measured_us(L) : cost_model(L);
+        double c = measured ? measured_us(L) : cost_model(L);
         if (c < bestc) {
             bestc = c;
             best = L;
