@@ -187,9 +187,11 @@ static void fft_label(uint32_t L, char *buf, size_t len) {
     else snprintf(buf, len, "%u", L);
 }
 
-static kite_ctx *open_ctx(const args *A, kite_opts *o) {
+// edge: the FFT length kite_prp chooses (at the round-off limit, with careful redos)
+static kite_ctx *open_ctx(const args *A, kite_opts *o, int edge) {
     memset(o, 0, sizeof *o);
     o->threads = A->threads > 1 ? (uint32_t)A->threads : 1;
+    o->edge = (uint32_t)edge;
     return kite_ctx_new(A->k, A->n, -1, o);
 }
 
@@ -287,7 +289,7 @@ static int done_read(const char *path, const args *A, kite_prp_result *res) {
 
 static int run_fermat(const args *A) {
     kite_opts o;
-    kite_ctx *ctx = open_ctx(A, &o);
+    kite_ctx *ctx = open_ctx(A, &o, 1);
     if (!ctx) {
         fprintf(stderr, "kite-prst: cannot set up arithmetic for %s\n", A->expr);
         return 1;
@@ -398,7 +400,7 @@ static int run_fermat(const args *A) {
     }
     if (A->proof_op == 1) {
         double t = now();
-        kite_ctx *c2 = open_ctx(A, &o);
+        kite_ctx *c2 = open_ctx(A, &o, 0);
         uint64_t raw = 0;
         int prc = c2 ? pp_save_products(c2, A->k, A->n, A->a, A->proof_count, R.prefix,
                                         A->proof_keep, &abort_flag, &raw)
@@ -456,7 +458,7 @@ static int run_llr(const args *A) {
         return 1;
     }
     kite_opts o;
-    kite_ctx *ctx = open_ctx(A, &o);
+    kite_ctx *ctx = open_ctx(A, &o, 0);
     if (!ctx) {
         fprintf(stderr, "kite-prst: cannot set up arithmetic for %s\n", A->expr);
         return 1;
@@ -512,7 +514,7 @@ static int run_llr(const args *A) {
 
 static int run_build(const args *A) {
     kite_opts o;
-    kite_ctx *ctx = open_ctx(A, &o);
+    kite_ctx *ctx = open_ctx(A, &o, 0);
     if (!ctx) return 1;
     uint32_t fpN = pp_fingerprint(A->k, A->n);
     char prefix[64];
@@ -534,7 +536,7 @@ static int run_build(const args *A) {
 
 static int run_cert(const args *A) {
     kite_opts o;
-    kite_ctx *ctx = open_ctx(A, &o);
+    kite_ctx *ctx = open_ctx(A, &o, 0);
     if (!ctx) return 1;
     char path[4096];
     if (!A->cert_path || !strcmp(A->cert_path, "default"))

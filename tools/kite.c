@@ -2,7 +2,7 @@
 //
 //   kite prp  K N | "K*2^N-1"  [--expect HEX] [--base B] [--ckpt FILE]
 //                                 [--ckpt-secs S] [--uckpt FILE] [--uckpt-secs S]
-//                                 [--block B] [--fault ITER]
+//                                 [--block B] [--fault ITER] [--careful-limit N]
 //   kite time K N [--iters N]
 //   kite throughput K N [--configs 10x1,5x2,...] [--secs S]
 //   kite tune LMIN LMAX [--out FILE]
@@ -158,6 +158,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--uckpt-secs")) po.unverified_secs = atof(v);
         else if (!strcmp(a, "--block")) po.gerbicz_block = (uint32_t)atoi(v);
         else if (!strcmp(a, "--fault")) po.inject_fault_at = strtoull(v, 0, 10);
+        else if (!strcmp(a, "--careful-limit")) po.careful_per_round = (uint32_t)atoi(v);
         else if (!strcmp(a, "--configs")) cfg = v;
         else if (!strcmp(a, "--secs")) secs = atof(v);
         else if (!strcmp(a, "--out")) out = v;
@@ -178,9 +179,10 @@ int main(int argc, char **argv) {
             return 1;
         }
         printf("%" PRIu64 "*2^%" PRIu64 "-1 is %s  RES64 %016" PRIX64
-               "  FFT %u  %.1f s (%.1f us/iter)  maxerr %.4f  gerbicz_errors %u  fft_retries %u%s\n",
+               "  FFT %u  %.1f s (%.1f us/iter)  maxerr %.4f  gerbicz_errors %u  fft_retries %u"
+               "  careful_ops %u%s\n",
                k, n, r.is_prp ? "a probable prime!" : "composite", r.res64, r.fft_len, r.seconds,
-               r.seconds * 1e6 / n, r.maxerr, r.gerbicz_errors, r.roundoff_retries,
+               r.seconds * 1e6 / n, r.maxerr, r.gerbicz_errors, r.roundoff_retries, r.careful_ops,
                r.resumed ? "  (resumed)" : "");
         if (expect) {
             int ok = strtoull(expect, 0, 16) == r.res64;

@@ -2048,3 +2048,49 @@ Nominal. CPU 178.7 tests/hour (below 9 tests' 183.2: the tenth test only takes c
 others), GPU 67 (32 slots correct, 1716.5 s), total 245.7. Best is 9 CPU tests + GPU: 253.2
 against 223.8 for the CPU alone. `gpu_prp` uses ~no CPU, but the power it takes comes out of the
 P-cores' clocks either way.
+
+## 2026-10-18 14:25 — Careful redo at the same FFT length, as gwnum does
+
+How PRST and gwnum run at the edge, from `~/code/prst/framework` and gwnum 31.07's `gwnum.c`
+(read for the method, not copied: gwnum's licence is the GIMPS one):
+- PRST checks round-off on every operation only when the FFT is within 1% of its limit
+  (`gwnear_fft_limit(gwdata, 1)` in `framework/task.cpp`); other tests run unchecked.
+- `ReliableGWArithmetic::mul` (`framework/arithmetic/arithmetic.cpp`): an operation over 0.4 is
+  repeated once (a hardware fault would not repeat), then redone with `gwmul3_carefully`; only
+  if that is over too does the task restart with a larger FFT. An in-place square cannot be
+  redone, so the task restarts from its last state with that operation marked for the careful
+  path.
+- `gwmul3_carefully` squares x as (x + r)(x − r) + r² for a fixed random r (r² cached): the
+  same value from different data, so the round-off is a new draw.
+
+kite now does the same in `kite_prp`:
+- `kite_opts.edge`: lengths at `kite_fit_bpw` (no 0.2 margin, no 0.25 room); `kite_prp` sets
+  it for an automatic length and `kite-prst` announces the same length. LLR, proof products,
+  proof build and certificates keep the conservative choice (they have no recovery).
+- Round-off checked on every squaring when n/L is past `kite_safe_bpw`, else every 4th.
+  Checking every squaring costs 1.9% at 28K (66.9 against 65.6 µs per squaring).
+- A squaring over 0.40 in a block is replayed from the last snapshot (every 32 squarings, so a
+  replay is at most 32) and done as (x + r)(x − r) + r², with x ± r normalised by an exact
+  digit carry (`kite_mul_small(x, 1)`) first; the block's d·x and the Gerbicz check's t·x0 as
+  (t + r)·x − r·x. The tail (< B squarings, run twice) is checked the same way, since two
+  identical computations would repeat a round-off error. Only a careful operation over the
+  limit goes back to the verified state with a longer FFT.
+
+Tests: forced lengths far too short for 9357·2^200001−1 (13824 → 12288 against 14336 chosen)
+all end with the right residue via careful ops and FFT retries. At the edge, 2007·2^432901−1
+(kite chose 28800; fit limit 432,920) ran with 12 careful ops, all accepted, no FFT retry,
+residue equal to a 32K run (EEF2EAA30690DC6A); 2007·2^425985−1 at 28K: 0 careful ops,
+residue equal to 32K. Lengths: 2007·2^425985−1 32K → 28K (gwnum: 28K), 6073·2^2290815−1
+175K → 168K (gwnum: 192K); 240K, 256K and 432K unchanged (4813·2^5500155−1 needs 13.43 bits
+per word at 400K, the fit allows 13.30, gwnum 13.44).
+
+Production size: 6073·2^2290815−1 with `kite-prst` defaults (168K, was 175K; PRST 192K) gave the
+known residue 38C439B2944CD35A in 1134 s; forced to 165,888 (0.29 bits per word past the fit) a
+careful redo was over too, so it moved to 172,800 and gave the same residue (1246 s, 2 careful
+ops, 1 FFT retry). M4, 10 tests, ABBA: 168K 0.923 ms per squaring against 175K 0.949 (17.0
+against 16.6 tests/hour, +2.8% with every squaring checked); PRST 15.7, so 1.08×.
+
+A guard: more than 32 careful redos in one round move the test up a length at the block
+boundary, x, d and t carried over unverified (the next check covers them, as for an unverified
+checkpoint). `--careful-limit 2` on 2007·2^432901−1 moved it from 28800 to 30720 after 5 careful
+redos, residue correct. New ctest `edge_careful` runs both; suite 23/23.

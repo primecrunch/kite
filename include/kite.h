@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define KITE_VERSION "0.1.10"
+#define KITE_VERSION "0.1.11"
 
 typedef struct kite_ctx kite_ctx;
 typedef struct kite_num kite_num;
@@ -32,6 +32,9 @@ typedef struct {
     // FFT stage order: 0 = from the tuning file (default order if untuned),
     // else 1 + bits: bit 0 column radices ascending, bit 1 row radices ascending
     uint32_t plan_order;
+    // 1 = choose the FFT length at the round-off limit (kite_fit_bpw) rather than with a margin:
+    // for callers that recover from a high round-off one operation at a time, as kite_prp does.
+    uint32_t edge;
 } kite_opts;
 
 // Only c = -1 (Riesel) is supported for now.
@@ -74,7 +77,11 @@ typedef struct {
     kite_opts fft;              // backend / FFT length (0 = auto) / threads
     uint32_t gerbicz_block;    // 0 = auto (~sqrt(n), at least 32)
     uint32_t gerbicz_blocks;   // blocks between checks; 0 = auto (block/4, at least 8)
-    double max_roundoff;       // 0 = 0.40; above this the step is redone with a larger FFT
+    // 0 = 0.40. Above this the operation is redone carefully, x^2 as (x+r)(x-r)+r^2 for a fixed
+    // random r, at the same FFT length; only if that is also over does the test go back to the
+    // verified state with a larger FFT. Round-off is checked on every operation when the FFT
+    // length is past kite_safe_bpw (as an fft.edge length is), else on every 4th.
+    double max_roundoff;
     const char *checkpoint;    // save file path (NULL = none)
     double checkpoint_secs;    // 0 = 600
     // Unverified state, written every unverified_secs at a block boundary without a Gerbicz
@@ -86,6 +93,9 @@ typedef struct {
     void (*progress)(void *arg, uint64_t iter, uint64_t n, double maxerr);
     void *progress_arg;
     uint64_t inject_fault_at;  // testing: corrupt the state at this iteration (0 = never)
+    // More careful redos than this in one Gerbicz round move the test to a longer FFT at the
+    // next block boundary (0 = 32).
+    uint32_t careful_per_round;
     // Proof points: ascending iteration positions (0..n) at which x_i is reported through
     // on_point, once a Gerbicz check (or the doubled tail) has verified it, or with an
     // unverified checkpoint. Points at or before a resumed checkpoint are not reported again.
@@ -108,6 +118,7 @@ typedef struct {
     double maxerr;             // max round-off seen
     uint32_t gerbicz_errors;   // detected and recovered
     uint32_t roundoff_retries; // FFT length increases
+    uint32_t careful_ops;      // operations redone carefully after a round-off over max_roundoff
     int resumed;               // started from a checkpoint
     uint64_t resumed_at;       // iteration it resumed from
     double seconds;

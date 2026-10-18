@@ -27,10 +27,14 @@ bool kite_fft_len_ok(uint32_t L) {
 // max error <= 0.25 over a few hundred squarings) on the NEON backend:
 //   21.44 - 0.305*(log2 L - 12) - 0.50*log2 k
 // less a margin so that the max error over a full test stays below 0.4.
+// The fit itself is where gwnum puts its FFT limits (prst -fft info: 4813 at 400K 13.44 bits per
+// word against a fit of 13.30, 2007 at 240K 14.23 against 14.15); kite_prp runs there, with
+// round-off checked on every operation and a careful redo of any over the limit.
 #define BPW_MARGIN 0.2
-double kite_safe_bpw(uint32_t L, uint64_t k) {
-    return 21.44 - 0.305 * (log2((double)L) - 12) - 0.50 * log2((double)k) - BPW_MARGIN;
+double kite_fit_bpw(uint32_t L, uint64_t k) {
+    return 21.44 - 0.305 * (log2((double)L) - 12) - 0.50 * log2((double)k);
 }
+double kite_safe_bpw(uint32_t L, uint64_t k) { return kite_fit_bpw(L, k) - BPW_MARGIN; }
 
 // Measured squaring times (us) per FFT length, loaded from a tuning file with
 // lines "L us [order]" (see `kite tune`; order as kite_opts.plan_order bits,
@@ -125,17 +129,22 @@ static double cost_model(uint32_t L) {
 
 static bool len_usable(uint32_t L) { return L % 64 == 0 && kite_fft_len_ok(L); }
 
-uint32_t kite_choose_fft_len(uint64_t k, uint64_t n) {
+static uint32_t choose_len(uint64_t k, uint64_t n, double margin, double room);
+
+uint32_t kite_choose_fft_len(uint64_t k, uint64_t n) { return choose_len(k, n, BPW_MARGIN, 0.25); }
+uint32_t kite_choose_fft_len_edge(uint64_t k, uint64_t n) { return choose_len(k, n, 0, 0); }
+
+static uint32_t choose_len(uint64_t k, uint64_t n, double margin, double room) {
     if (n < 2048) {
         // tiny numbers (reference backend): short power-of-two lengths
         for (uint32_t L = 16; L <= n; L *= 2) {
-            if ((double)n / L <= kite_safe_bpw(L, k)) return L;
+            if ((double)n / L <= kite_fit_bpw(L, k) - margin) return L;
         }
         return 0;
     }
     uint32_t Lmin = 0;
     for (uint32_t L = 64; L && L < (1u << 28); L += 64) {
-        if (len_usable(L) && (double)n / L <= kite_safe_bpw(L, k)) {
+        if (len_usable(L) && (double)n / L <= kite_fit_bpw(L, k) - margin) {
             Lmin = L;
             break;
         }
@@ -152,18 +161,18 @@ uint32_t kite_choose_fft_len(uint64_t k, uint64_t n) {
     // With measurements, only measured lengths are candidates (`kite tune` records every length
     // the NEON backend can shape); without any in the range, the heuristic over all of them.
     int measured = 0, roomy = 0;
-    const double ROOM = 0.25;
+    const double ROOM = room;
     for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
         if (!len_usable(L)) continue;
         if (measured_us(L) >= 0) measured = 1;
     }
     for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
         if (!len_usable(L) || (measured && measured_us(L) < 0)) continue;
-        if ((double)n / L <= kite_safe_bpw(L, k) - ROOM) roomy = 1;
+        if ((double)n / L <= kite_fit_bpw(L, k) - margin - ROOM) roomy = 1;
     }
     for (uint32_t L = Lmin; L <= Lmin + Lmin / 10 * 3; L += 64) {
         if (!len_usable(L) || (measured && measured_us(L) < 0)) continue;
-        if (roomy && (double)n / L > kite_safe_bpw(L, k) - ROOM) continue;
+        if (roomy && (double)n / L > kite_fit_bpw(L, k) - margin - ROOM) continue;
         double c = measured ? measured_us(L) : cost_model(L);
         if (c < bestc) {
             bestc = c;
@@ -261,7 +270,9 @@ kite_ctx *kite_ctx_new(uint64_t k, uint64_t n, int32_t c, const kite_opts *o) {
     ctx->k = k;
     ctx->n = n;
     ctx->c = c;
-    ctx->L = o && o->fft_len ? o->fft_len : kite_choose_fft_len(k, n);
+    ctx->L = o && o->fft_len ? o->fft_len
+           : o && o->edge   ? kite_choose_fft_len_edge(k, n)
+                            : kite_choose_fft_len(k, n);
     ctx->threads = o && o->threads ? o->threads : 1;
     ctx->plan_order = o && o->plan_order ? (o->plan_order - 1) & 3 : kite_tuned_plan_order(ctx->L);
     ctx->err_every = 1;

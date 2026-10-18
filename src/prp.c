@@ -237,6 +237,10 @@ static void pending_add(pending_points *p, kite_ctx *ctx, uint32_t index, const 
     p->count++;
 }
 
+static void pending_truncate(pending_points *p, uint32_t count) {
+    while (p->count > count) free(p->limbs[--p->count]);
+}
+
 static int pending_flush(pending_points *p, const kite_prp_opts *o) {
     int rc = 0;
     for (uint32_t i = 0; i < p->count && !rc; i++)
@@ -263,29 +267,112 @@ int kite_prp_checkpoint_iter(const char *path, uint64_t k, uint64_t n, uint32_t 
 typedef struct {
     kite_ctx *ctx;
     kite_num *x, *d, *x0, *t;
+    // careful operations: r is a fixed pseudo-random number, r2 = r^2; c1, c2 scratch; b holds
+    // the value at the start of a block for a replay
+    kite_num *r, *r2, *c1, *c2, *b;
+    double maxround;
+    uint32_t careful;  // careful operations done
 } prp_state;
 
 static void state_free(prp_state *s) {
     if (!s->ctx) return;
-    kite_num_free(s->ctx, s->x);
-    kite_num_free(s->ctx, s->d);
-    kite_num_free(s->ctx, s->x0);
-    kite_num_free(s->ctx, s->t);
+    kite_num *nums[] = {s->x, s->d, s->x0, s->t, s->r, s->r2, s->c1, s->c2, s->b};
+    for (size_t i = 0; i < sizeof nums / sizeof nums[0]; i++)
+        if (nums[i]) kite_num_free(s->ctx, nums[i]);
     kite_ctx_free(s->ctx);
     memset(s, 0, sizeof *s);
 }
 
-static int state_new(prp_state *s, uint64_t k, uint64_t n, kite_opts o) {
+// Bring a sum of two stored numbers back to balanced digits (kite_add leaves them unbalanced,
+// which would raise the round-off of the multiplication that follows).
+static void normalise(prp_state *s, kite_num *x) { kite_mul_small(s->ctx, x, 1); }
+
+// x = x^2 as (x + r)(x - r) + r^2: the same value from a different multiplication, so its
+// round-off is a new draw. gwnum's gwmul3_carefully does the same; PRST redoes an operation with
+// it when its round-off is over the limit, at the same FFT length.
+static void careful_square(prp_state *s, kite_num *x) {
+    kite_copy(s->ctx, s->c1, x);
+    kite_add(s->ctx, s->c1, s->r);
+    normalise(s, s->c1);
+    kite_copy(s->ctx, s->c2, x);
+    kite_sub(s->ctx, s->c2, s->r);
+    normalise(s, s->c2);
+    kite_mul(s->ctx, s->c1, s->c2);
+    kite_add(s->ctx, s->c1, s->r2);
+    normalise(s, s->c1);
+    kite_copy(s->ctx, x, s->c1);
+    s->careful++;
+}
+
+// x = a * y as (a + r) y - r y (x may be a; y must not be x)
+static void careful_mul(prp_state *s, kite_num *x, const kite_num *a, const kite_num *y) {
+    kite_copy(s->ctx, s->c1, a);
+    kite_add(s->ctx, s->c1, s->r);
+    normalise(s, s->c1);
+    kite_mul(s->ctx, s->c1, y);
+    kite_copy(s->ctx, s->c2, s->r);
+    kite_mul(s->ctx, s->c2, y);
+    kite_sub(s->ctx, s->c1, s->c2);
+    normalise(s, s->c1);
+    kite_copy(s->ctx, x, s->c1);
+    s->careful++;
+}
+
+// More careful redos than this in one round (B*M squarings, ~830K at n = 3.3M) and the test
+// moves to a longer FFT: 32 replays of at most 32 squarings each cost ~0.15% of a round.
+#define CAREFUL_PER_ROUND 32
+
+static int over(const prp_state *s) { return kite_max_roundoff(s->ctx) > s->maxround; }
+
+// x = x^(2^count), each squaring checked: one over the limit is replayed from the last snapshot
+// (every 32 squarings) and done carefully. Returns 0, or -1 if a careful squaring is over too.
+static int square_n_checked(prp_state *s, kite_num *x, uint64_t count) {
+    uint64_t jb = 0;
+    for (uint64_t j = 0; j < count; j++) {
+        if (j % 32 == 0) {
+            kite_copy(s->ctx, s->b, x);
+            jb = j;
+        }
+        kite_square(s->ctx, x);
+        if (!over(s)) continue;
+        kite_reset_roundoff(s->ctx);
+        kite_copy(s->ctx, x, s->b);
+        for (uint64_t jj = jb; jj < j; jj++) kite_square(s->ctx, x);
+        careful_square(s, x);
+        if (over(s)) return -1;
+    }
+    return 0;
+}
+
+static int state_new(prp_state *s, uint64_t k, uint64_t n, kite_opts o, double maxround) {
     s->ctx = kite_ctx_new(k, n, -1, &o);
     if (!s->ctx) return -1;
-    // sample round-off on every 4th operation: enough to spot an FFT length
-    // that is too short; actual arithmetic errors are caught by Gerbicz
-    kite_set_roundoff_check(s->ctx, 4);
-    s->x = kite_num_new(s->ctx);
-    s->d = kite_num_new(s->ctx);
-    s->x0 = kite_num_new(s->ctx);
-    s->t = kite_num_new(s->ctx);
-    return s->x && s->d && s->x0 && s->t ? 0 : -1;
+    s->maxround = maxround;
+    // Past the safe-bpw margin (an fft.edge length) check every operation, as PRST does near its
+    // FFT limit, so an over-limit one is redone at once; otherwise sample every 4th, enough to
+    // spot an FFT length that is too short. Arithmetic errors are caught by Gerbicz either way.
+    uint32_t L = kite_fft_len(s->ctx);
+    kite_set_roundoff_check(s->ctx, (double)n / L > kite_safe_bpw(L, k) ? 1 : 4);
+    kite_num **nums[] = {&s->x, &s->d, &s->x0, &s->t, &s->r, &s->r2, &s->c1, &s->c2, &s->b};
+    for (size_t i = 0; i < sizeof nums / sizeof nums[0]; i++) {
+        *nums[i] = kite_num_new(s->ctx);
+        if (!*nums[i]) return -1;
+    }
+    // r: fixed pseudo-random bits below 2^(n-1), so r < N
+    size_t nl = kite_limbs(s->ctx);
+    uint64_t *l = calloc(nl, 8), z = 0x9E3779B97F4A7C15ull;
+    if (!l) return -1;
+    for (size_t i = 0; i < nl; i++) {
+        z ^= z << 13, z ^= z >> 7, z ^= z << 17;
+        l[i] = z;
+    }
+    for (uint64_t bit = n - 1; bit < 64 * nl; bit++) l[bit / 64] &= ~(1ull << (bit % 64));
+    kite_set_limbs(s->ctx, s->r, l);
+    free(l);
+    kite_copy(s->ctx, s->r2, s->r);
+    kite_square(s->ctx, s->r2);
+    kite_reset_roundoff(s->ctx);
+    return 0;
 }
 
 static int nums_equal(kite_ctx *ctx, const kite_num *a, const kite_num *b, uint64_t *la,
@@ -329,6 +416,8 @@ static void power_start(prp_state *s, uint64_t k, uint32_t base, uint64_t *l) {
 int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
             kite_prp_result *res) {
     kite_prp_opts o = opts ? *opts : (kite_prp_opts){0};
+    // the round-off recovery below lets an automatic length sit at the fitted limit
+    if (!o.fft.fft_len) o.fft.edge = 1;
     memset(res, 0, sizeof *res);
     double t_start = now();
     uint32_t B = o.gerbicz_block;
@@ -343,7 +432,8 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
     double u_secs = o.unverified_secs > 0 ? o.unverified_secs : 60;
 
     prp_state s = {0};
-    if (state_new(&s, k, n, o.fft)) {
+    if (state_new(&s, k, n, o.fft, maxround)) {
+        res->careful_ops += s.careful;
         state_free(&s);
         return -1;
     }
@@ -377,8 +467,9 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
         if (L > kite_fft_len(s.ctx)) {
                 kite_opts fo = o.fft;
                 fo.fft_len = L;
+                res->careful_ops += s.careful;
                 state_free(&s);
-                if (state_new(&s, k, n, fo)) {
+                if (state_new(&s, k, n, fo, maxround)) {
                     rc = -1;
                     goto out;
                 }
@@ -420,6 +511,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
             rc = KITE_PRP_ABORTED;
             goto out;
         }
+        uint32_t careful0 = s.careful;
         // run up to M blocks, keep d before the latest update in t
         uint64_t check_at = start + (uint64_t)B * M;
         if (check_at > full) check_at = full;
@@ -428,22 +520,87 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
             // after every block rather than only between rounds. A caller that sends SIGTERM waits
             // a bounded time and then kills, losing everything since the last checkpoint.
             if (o.abort_flag && *o.abort_flag) break;
+            // A squaring over the round-off limit is redone carefully at once: the block is
+            // replayed from its start (the squarings before it give the same values again) and
+            // that squaring done as (x+r)(x-r)+r^2. Only if that is over too does the round fail.
+            // Snapshots every SNAP squarings bound a replay to SNAP squarings (a 2 MB copy at 256K
+            // costs ~0.1 ms against ~0.7 ms a squaring).
+            enum { SNAP = 32 };
+            uint64_t ib = i;
+            uint32_t pib = pi, pcb = pend.count, jb = 0;
             for (uint32_t j = 0; j < B; j++) {
+                if (j % SNAP == 0) {
+                    kite_copy(s.ctx, s.b, s.x);
+                    ib = i;
+                    pib = pi;
+                    pcb = pend.count;
+                    jb = j;
+                }
                 kite_square(s.ctx, s.x);
                 i++;
                 if (o.inject_fault_at && i == o.inject_fault_at) {
                     kite_debug_corrupt(s.ctx, s.x);
                     o.inject_fault_at = 0;  // once
                 }
+                if (over(&s)) {
+                    kite_reset_roundoff(s.ctx);
+                    kite_copy(s.ctx, s.x, s.b);
+                    pending_truncate(&pend, pcb);
+                    i = ib;
+                    pi = pib;
+                    for (uint32_t jj = jb; jj < j; jj++) {
+                        kite_square(s.ctx, s.x);
+                        i++;
+                        if (pi < o.npoints && o.points[pi] == i && o.on_point) pending_add(&pend, s.ctx, pi++, s.x);
+                    }
+                    careful_square(&s, s.x);
+                    i++;
+                    if (over(&s)) {
+                        round_fail = 1;
+                        break;
+                    }
+                }
                 if (pi < o.npoints && o.points[pi] == i && o.on_point) pending_add(&pend, s.ctx, pi++, s.x);
             }
+            if (round_fail) break;
             // t is kept at every block, not only the last of the round, so a stop part way through
             // can verify up to the block it reached instead of dropping the whole round.
             kite_copy(s.ctx, s.t, s.d);
             kite_mul(s.ctx, s.d, s.x);
-            if (kite_max_roundoff(s.ctx) > maxround) {
-                round_fail = 1;
-                break;
+            if (over(&s)) {
+                kite_reset_roundoff(s.ctx);
+                careful_mul(&s, s.d, s.t, s.x);
+                if (over(&s)) {
+                    round_fail = 1;
+                    break;
+                }
+            }
+            // Careful redos this frequent cost more than a longer FFT: move up a length here, at
+            // the block boundary, with x, d and t carried over unverified. d is the product of
+            // every block's x since the start, so the next check covers the squarings before
+            // the move too, as for a resume from the unverified checkpoint.
+            if (s.careful - careful0 > (o.careful_per_round ? o.careful_per_round : CAREFUL_PER_ROUND)) {
+                uint32_t L = kite_fft_len(s.ctx);
+                kite_opts fo = o.fft;
+                fo.fft_len = kite_next_fft_len(L + L / 25);
+                uint64_t *mx = malloc(nl * 8), *md = malloc(nl * 8), *mt = malloc(nl * 8);
+                kite_get_limbs(s.ctx, s.x, mx);
+                kite_get_limbs(s.ctx, s.d, md);
+                kite_get_limbs(s.ctx, s.t, mt);
+                res->careful_ops += s.careful;
+                state_free(&s);
+                if (!fo.fft_len || state_new(&s, k, n, fo, maxround)) {
+                    free(mx), free(md), free(mt);
+                    rc = -2;
+                    goto out;
+                }
+                power_start(&s, k, base, la);
+                kite_set_limbs(s.ctx, s.x, mx);
+                kite_set_limbs(s.ctx, s.d, md);
+                kite_set_limbs(s.ctx, s.t, mt);
+                free(mx), free(md), free(mt);
+                careful0 = s.careful;
+                res->roundoff_retries++;
             }
             if (o.progress) o.progress(o.progress_arg, i, n, kite_max_roundoff(s.ctx));
             // Unverified state every u_secs, for a test killed without the chance to stop. It
@@ -468,10 +625,17 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
         if (stopping && i == start) continue;  // nothing new to verify; saved at the top
         if (!round_fail && i > start) {
             // verify d == x0 * t^(2^B)
-            kite_square_n(s.ctx, s.t, B);
-            kite_mul(s.ctx, s.t, s.x0);
-            if (kite_max_roundoff(s.ctx) > maxround) round_fail = 1;
-            else failed = !nums_equal(s.ctx, s.t, s.d, la, lb);
+            if (square_n_checked(&s, s.t, B)) round_fail = 1;
+            else {
+                kite_copy(s.ctx, s.b, s.t);
+                kite_mul(s.ctx, s.t, s.x0);
+                if (over(&s)) {
+                    kite_reset_roundoff(s.ctx);
+                    careful_mul(&s, s.t, s.b, s.x0);
+                    if (over(&s)) round_fail = 1;
+                }
+                if (!round_fail) failed = !nums_equal(s.ctx, s.t, s.d, la, lb);
+            }
         }
         if (kite_max_roundoff(s.ctx) > res->maxerr) res->maxerr = kite_max_roundoff(s.ctx);
         // An unverified save from this round, or the one resumed from, may hold the error.
@@ -481,8 +645,9 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
             uint32_t L = kite_fft_len(s.ctx);
             kite_opts fo = o.fft;
             fo.fft_len = kite_next_fft_len(L + L / 25);
+            res->careful_ops += s.careful;
             state_free(&s);
-            if (!fo.fft_len || state_new(&s, k, n, fo)) {
+            if (!fo.fft_len || state_new(&s, k, n, fo, maxround)) {
                 rc = -2;
                 goto out;
             }
@@ -530,8 +695,26 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
             while (i < n) {
                 uint64_t next = n;
                 if (o.on_point && pi < o.npoints && o.points[pi] > i && o.points[pi] < next) next = o.points[pi];
-                kite_square_n(s.ctx, s.x, next - i);
-                kite_square_n(s.ctx, s.t, next - i);
+                // checked like the blocks: two identical computations would repeat a round-off error
+                if (square_n_checked(&s, s.x, next - i) || square_n_checked(&s, s.t, next - i)) {
+                    uint32_t L = kite_fft_len(s.ctx);
+                    kite_opts fo = o.fft;
+                    fo.fft_len = kite_next_fft_len(L + L / 25);
+                    res->careful_ops += s.careful;
+                    state_free(&s);
+                    if (!fo.fft_len || state_new(&s, k, n, fo, maxround)) {
+                        rc = -2;
+                        goto out;
+                    }
+                    power_start(&s, k, base, la);
+                    res->roundoff_retries++;
+                    kite_set_limbs(s.ctx, s.x, vx);
+                    kite_set_limbs(s.ctx, s.t, vx);
+                    i = full;
+                    pi = vp;
+                    pending_clear(&pend);
+                    continue;
+                }
                 i = next;
                 if (o.on_point && pi < o.npoints && o.points[pi] == i) pending_add(&pend, s.ctx, pi++, s.x);
             }
@@ -568,6 +751,7 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
     res->fft_len = kite_fft_len(s.ctx);
     if (kite_max_roundoff(s.ctx) > res->maxerr) res->maxerr = kite_max_roundoff(s.ctx);
 out:
+    res->careful_ops += s.careful;
     res->seconds = now() - t_start;
     pending_clear(&pend);
     free(pend.index);
