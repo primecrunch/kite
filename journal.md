@@ -2175,3 +2175,14 @@ the single-core choice at 26 lengths. `tools/gen_fft_times.sh` now takes orders 
 present and keeps the single-core times for the length choice. 400K moves to order 3 (−1.5%
 under load, measured above). Known residues after the change: 9357·2^200001−1 and
 6073·2^2290815−1 (168K, 1080 s on the M4, no careful redos, no sum errors).
+
+## 2026-10-19 14:20 — P against E cores
+
+Production results first: on wolf kite 0.1.13 is 16% (240K) and 10% (256K) faster than PRST over
+whole tests (64 and 28 kite tests against 7 and 3 PRST); on eagle 2–6% faster at 240K and level at
+256K (16 PRST tests from today). A scaling run on eagle (1/4/6/10 tests, 64K–256K,
+`docs/results/scaling-pe-2026-10-19.md`) shows where the single-test lead goes: none of it on the
+four P cores, all of it on the six E cores, whose added throughput is 7% (64K) to 19% (256K) lower
+with kite. Rosetta's cost shows on the P cores; on the E cores the shared 4 MB L2 decides, and
+kite's per-test footprint is larger (the full-size t4 twiddle table). Blog material: emulation
+overhead is a CPU cost, and on a cache-starved core it stops being the thing that decides speed.
