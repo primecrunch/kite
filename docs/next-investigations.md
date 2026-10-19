@@ -185,6 +185,9 @@ work, and moves each size over to kite as kite improves.
 - Exit: on eagle and wolf, the client picks kite at 160K–288K and PRST at 432K, and its tests
   per hour match the faster engine's within the calibration's noise.
 - A primecrunch change: needs Andy's go-ahead.
+- Status 2026-10-19: lower priority. With 0.1.14+ kite is level or ahead at every production
+  size measured (240K, 256K, 400K), so there is no size range left for PRST to win. Revisit only if
+  production data shows one.
 
 ## 5. The GPU on desktop Macs
 
@@ -200,3 +203,55 @@ budget, so the GPU may add throughput on top of every CPU core.
   driver, before kite-prst could use it.
 - Exit: a measured sustained gain on a desktop, or a measured reason the GPU cannot add to the
   CPU on Apple Silicon at these sizes.
+- Status 2026-10-19: the first measurement is done. On eagle, 9 CPU tests + the GPU at 32K gave
+  +13% over 10 CPU tests. The next step is the production-size work above.
+
+## 6. kite as the default engine on Apple Silicon
+
+Today only machines started with `PC_ENGINE=kite` run kite; every other member's Mac runs PRST
+under Rosetta. Over whole production tests, kite 0.1.13 beat PRST by 16% (240K) and 10% (256K) on
+wolf (M4 Pro, 4 of 14 cores E) and by 2–6% (240K) / level (256K) on eagle (M4, 6 of 10 E); 0.1.14
+and 0.1.15 add 2–6% under load on top.
+
+- Before deciding: a day of 0.1.15 on both machines, then the production comparison by
+  `compute_seconds ÷ n` per FFT class (dba agent), excluding tests restarted across engines.
+- Cost: checkpoints are not shared between engines, so switching restarts the tests a machine has
+  in progress, at most one test per core, once.
+- A primecrunch change: needs Andy's go-ahead. Highest expected gain of anything on this list.
+
+## 7. Vector scheduling for the E cores
+
+Measured on eagle (`docs/results/e-core-diagnosis-2026-10-19.md`): kite does 4.6% more squarings
+per P-core second than PRST and 10% fewer per E-core second. Not memory traffic, misses, the
+normaliser, radix-8 register pressure or instruction count. Isolated kernels reach 8–9 IPC on P
+cores and 3–4 on E cores; kite issues 1.86 vector instructions per cycle on an E core against
+PRST's 2.52.
+
+- Idea: interleave two lane-groups per loop iteration in the stage kernels, so an E core has two
+  independent butterfly chains to overlap; measure E-core IPC per kernel with `tools/kloop.c`
+  first, then 10 tests ABBA.
+- Bound: the ~10% per E-core second, about 5% overall on eagle, less on wolf.
+- Exit: a kernel variant that raises E-core IPC in `kloop` and shows at 10 tests, or a measured
+  reason the E cores cannot do better on this code.
+
+## 8. Four-pair pattern normaliser
+
+The pattern normaliser handles one or two row pairs per loop (P = 1, 2). Four pairs per loop
+gives more independent carry chains. Expected about 1.5%, well understood; the bit-identical check
+(same residues and max error) applies.
+
+## 9. Pass 2 without the row copies
+
+Pass 2 copies each row pair into a layout-a scratch, transforms it there and copies it back
+(`dif_r4_rows`, `dit_r4_rows_tan`, about 11–13% of the time at 240K). Working in place in layout b
+would remove the copies. A few percent at most and uncertain, now that L1 traffic is ruled out as
+the E-core limit; larger work (new kernel layouts and a reworked pass 2).
+
+## Proposals, 2026-10-19 (0.1.15), in order
+
+1. kite as the default on Apple Silicon (6), after a day of 0.1.15 and a production check.
+   Largest gain; a primecrunch decision.
+2. The GPU at production sizes on desktop Macs (5). +13% measured at 32K on eagle; substantial work.
+3. Vector scheduling for the E cores (7). Up to ~5% on eagle; uncertain.
+4. Four-pair normaliser (8), about 1.5%; pass 2 in place (9), a few percent, uncertain.
+5. Engine choice per FFT size (4), only if production data shows a size where PRST wins.
