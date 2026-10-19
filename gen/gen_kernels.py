@@ -19,6 +19,10 @@ FFT stage kernels (radix p in 2,3,4,5,7,8), all unnormalised:
       vector stored at (address of y_t) + delta (four-step twiddle table).
   kite_dit_r{p}, kite_dit_r{p}_notw, kite_dit_r{p}_t4: inverse: inputs are first
       multiplied by conj(twiddle), then inverse DFT_p.
+  kite_dif_r{p}_t4g_b(base, estride, nlg, nblocks, bstride, hi, lo) and kite_dit_r{p}_t4g_b:
+      as _t4_b, with the four-step twiddle of row r built in the kernel as
+      hi[r] * lo[r][lane-group]: hi holds one complex [re, im] per row, lo one 128-byte
+      row (re[8], im[8], the layout of an 8-column block) per row.
 
 Usage: gen_kernels.py OUTDIR
 """
@@ -433,9 +437,28 @@ def stc(g, c, addr, layout):
         g.emit("str %s, [%s, #%d]" % (q(c[1]), addr, imoff))
 
 
+def t4g_twiddle(f, t, layout):
+    """Row t's four-step twiddle hi[t] * lo[t][lane-group] (see the module docstring)."""
+    g, R = f.g, f.R
+    h = R.get()
+    lo = R.cx()
+    g.emit("ldr %s, [x16, #%d]" % (q(h), 16 * t))
+    g.emit("ldr %s, [x25, #%d]" % (q(lo[0]), 128 * t))
+    g.emit("ldr %s, [x25, #%d]" % (q(lo[1]), 128 * t + LAYOUT[layout][0]))
+    w = R.cx()
+    lr, li = v(lo[0]), v(lo[1])
+    f.e("fmul %s, %s, v%d.d[0]" % (v(w[0]), lr, h))
+    f.e("fmls %s, %s, v%d.d[1]" % (v(w[0]), li, h))
+    f.e("fmul %s, %s, v%d.d[1]" % (v(w[1]), lr, h))
+    f.e("fmla %s, %s, v%d.d[0]" % (v(w[1]), li, h))
+    R.put(h)
+    R.putcx(lo)
+    return w
+
+
 def gen_stage(g, p, direction, mode, layout="a"):
-    """direction 'dif' or 'dit'; mode 'tw', 'notw', 't4' or 'tan' (DIT with a
-    tangent-form table, p in TAN_NSCAL); layout 'a' or 'b' (layout 'b' kernels
+    """direction 'dif' or 'dit'; mode 'tw', 'notw', 't4', 't4g' (layout 'b' only) or 'tan'
+    (DIT with a tangent-form table, p in TAN_NSCAL); layout 'a' or 'b' (layout 'b' kernels
     carry the suffix _b)."""
     name = "%s%s_r%d%s%s" % (PREFIX, direction, p, "" if mode == "tw" else "_" + mode,
                              "" if layout == "a" else "_b")
@@ -448,6 +471,10 @@ def gen_stage(g, p, direction, mode, layout="a"):
     # x0 base, x1 estride, x2 nlg, x3 nblocks, x4 bstride, x5 s, x6 tw / delta
     if mode == "t4":
         g.emit("mov x6, x5")  # delta
+        g.emit("mov x5, #1")
+    if mode == "t4g":
+        g.emit("mov x16, x5")  # hi, one row's entry per 16 bytes
+        g.emit("mov x17, x6")  # lo, one row per 128 bytes
         g.emit("mov x5, #1")
     g.emit("mul x7, x5, x1")  # S = s * estride
     # element offsets t*S in x19..x25
@@ -496,6 +523,8 @@ def gen_stage(g, p, direction, mode, layout="a"):
             g.emit("ldr q%d, [x10], #16" % twregs[t])
     g.emit("mov x12, x9")  # lane-group pointer
     g.emit("mov x13, x2")  # lg counter
+    if mode == "t4g":
+        g.emit("mov x25, x17")  # lo at this lane-group
     g.label("3")  # lg loop
 
     R = Regs(avail)
@@ -514,6 +543,8 @@ def gen_stage(g, p, direction, mode, layout="a"):
             g.emit("add x15, x14, x6")
             ldc(g, w, "x15", layout)
             c = cmul_vec(f, c, w, conj=True)
+        if direction == "dit" and mode == "t4g":
+            c = cmul_vec(f, c, t4g_twiddle(f, t, layout), conj=True)
         x.append(c)
 
     def store(t, y):
@@ -525,6 +556,8 @@ def gen_stage(g, p, direction, mode, layout="a"):
             g.emit("add x15, x14, x6")
             ldc(g, w, "x15", layout)
             y = cmul_vec(f, y, w, conj=False)
+        if direction == "dif" and mode == "t4g":
+            y = cmul_vec(f, y, t4g_twiddle(f, t, layout), conj=False)
         stc(g, y, "x14", layout)
         R.putcx(y)
 
@@ -546,11 +579,16 @@ def gen_stage(g, p, direction, mode, layout="a"):
             store(t, ys[t])
 
     g.emit("add x12, x12, #%d" % LAYOUT[layout][1])
+    if mode == "t4g":
+        g.emit("add x25, x25, #%d" % LAYOUT[layout][1])
     g.emit("subs x13, x13, #1")
     g.emit("b.ne 3b")
     g.emit("add x9, x9, x1")
     g.emit("subs x11, x11, #1")
     g.emit("b.ne 2b")
+    if mode == "t4g":
+        g.emit("add x16, x16, #%d" % (16 * p))
+        g.emit("add x17, x17, #%d" % (128 * p))
     g.emit("add x8, x8, x4")
     g.emit("subs x3, x3, #1")
     g.emit("b.ne 1b")
@@ -1323,6 +1361,7 @@ def main():
             for mode in ("tw", "notw", "t4"):
                 for layout in ("a", "b"):
                     gen_stage(g, p, d, mode, layout)
+            gen_stage(g, p, d, "t4g", "b")
         if p in TAN_NSCAL:
             for layout in ("a", "b"):
                 gen_stage(g, p, "dit", "tan", layout)

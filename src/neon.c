@@ -71,6 +71,7 @@ static inline int prof_enabled(void) {
 
 typedef void (*stage_fn)(double *, size_t, size_t, size_t, size_t, size_t, const double *);
 typedef void (*t4_fn)(double *, size_t, size_t, size_t, size_t, ptrdiff_t);
+typedef void (*t4g_fn)(double *, size_t, size_t, size_t, size_t, const double *, const double *);
 
 typedef struct {
     uint8_t p;
@@ -79,6 +80,7 @@ typedef struct {
     // [0]: layout a (pass-2 pair scratch), [1]: layout b (8-column blocks)
     stage_fn tw_f[2], notw_f[2];
     t4_fn dif_t4[2], dit_t4[2];
+    t4g_fn dif_t4g, dit_t4g;  // layout b, twiddles built from st->t4hi and st->t4lo
     stage_fn dit_tw[2], dit_notw[2];
     // tangent-form DIT (p in 2, 3, 4, 8 with s > 1, else NULL) and its table
     stage_fn dit_tan[2];
@@ -99,7 +101,10 @@ typedef struct {
     uint32_t H, R, C, ngroups;
     size_t rowstride;  // bytes
     nplan pr, pc;
-    double *t4;        // four-step twiddles, same layout as data
+    double *t4;        // four-step twiddles, same layout as data (NULL: built in the kernels)
+    // otherwise w^{(8g+j) k_r} = t4hi[g][p] * t4lo[p][j], multiplied in the t4g kernels
+    double *t4lo;      // [p]: re[8], im[8], 128 bytes a row
+    double *t4hi;      // [g*R + p]: re, im
     int sme;           // radix-8 column stages on the SME unit
     double *A, *IA;    // [g*R + r]
     uint64_t *mask;    // [g*R + r]
@@ -165,6 +170,8 @@ static void set_fns(stage *s) {
         s->notw_f[1] = kite_dif_r##P##_notw_b;     \
         s->dif_t4[1] = kite_dif_r##P##_t4_b;       \
         s->dit_t4[1] = kite_dit_r##P##_t4_b;       \
+        s->dif_t4g = kite_dif_r##P##_t4g_b;        \
+        s->dit_t4g = kite_dit_r##P##_t4g_b;        \
         s->dit_tw[1] = kite_dit_r##P##_b;          \
         s->dit_notw[1] = kite_dit_r##P##_notw_b;   \
         break;
@@ -515,6 +522,18 @@ fail:
     return -1;
 }
 
+// Four-step twiddles from a full table (16 bytes per element, read every squaring) or built in
+// the kernels from two small ones (a complex multiply per element). With every core of an M4
+// busy the table wins below FFT 192K (1-2% at 64K-160K) and loses above it (2% at 240K, 6% at
+// 400K): the E-cores' shared L2 runs out. KITE_T4=table|gen overrides.
+static int t4_gen_policy(int sme, uint32_t H) {
+    const char *e = getenv("KITE_T4");
+    if (sme) return 0;  // the SME path multiplies by the table in kite_cmul_b
+    if (e && !strcmp(e, "table")) return 0;
+    if (e && !strcmp(e, "gen")) return 1;
+    return H >= 98304;
+}
+
 static int neon_init_impl(kite_ctx *ctx, int sme);
 static int neon_init(kite_ctx *ctx) { return neon_init_impl(ctx, 0); }
 
@@ -560,9 +579,25 @@ static int neon_init_impl(kite_ctx *ctx, int sme) {
     }
     ctx->num_doubles = R * st->rowstride / 8;
 
-    // four-step twiddles w_H^{c*k_r} at row position p
-    st->t4 = kite_alloc(ctx->num_doubles * sizeof(double));
-    for (uint32_t p = 0; p < R; p++) {
+    // four-step twiddles w_H^{c*k_r} at row position p: two small tables, or the full one
+    if (t4_gen_policy(sme, H)) {
+        st->t4lo = kite_alloc((size_t)R * 16 * sizeof(double));
+        st->t4hi = kite_alloc((size_t)st->ngroups * R * 2 * sizeof(double));
+        for (uint32_t p = 0; p < R; p++) {
+            uint32_t kr = st->pr.rev[p];
+            for (uint32_t j = 0; j < G; j++) {
+                double a = 2.0 * (double)((uint64_t)j * kr % H) / H;
+                st->t4lo[p * 16 + j] = __cospi(a);
+                st->t4lo[p * 16 + 8 + j] = -__sinpi(a);
+            }
+            for (uint32_t g = 0; g < st->ngroups; g++) {
+                double a = 2.0 * (double)((uint64_t)g * G * kr % H) / H;
+                st->t4hi[2 * ((size_t)g * R + p)] = __cospi(a);
+                st->t4hi[2 * ((size_t)g * R + p) + 1] = -__sinpi(a);
+            }
+        }
+    } else st->t4 = kite_alloc(ctx->num_doubles * sizeof(double));
+    for (uint32_t p = 0; st->t4 && p < R; p++) {
         uint32_t kr = st->pr.rev[p];
         for (uint32_t c = 0; c < C; c++) {
             double a = 2.0 * (double)((uint64_t)c * kr % H) / H;
@@ -696,6 +731,8 @@ static void neon_free(kite_ctx *ctx) {
     nplan_free(&st->pr);
     nplan_free(&st->pc);
     kite_free_aligned(st->t4);
+    kite_free_aligned(st->t4lo);
+    kite_free_aligned(st->t4hi);
     kite_free_aligned(st->A);
     kite_free_aligned(st->IA);
     kite_free_aligned(st->mask);
@@ -728,8 +765,38 @@ static inline int sme_stage(const neon_state *st, const stage *s) {
     return st->sme && s->p == 8 && ((size_t)s->s * s->nblocks) % 2 == 0;
 }
 
+// The row plan over one 8-column group with the twiddles built in the t4g kernels.
+static void group_fwd_gen(const neon_state *st, double *base, uint32_t g) {
+    const nplan *pl = &st->pr;
+    size_t es = st->rowstride;
+    const double *hi = st->t4hi + 2 * (size_t)g * st->R;
+    for (uint32_t i = 0; i < pl->nst; i++) {
+        const stage *s = &pl->st[i];
+        size_t bs = (size_t)s->s * s->p * es;
+        if (s->s == 1) s->dif_t4g(base, es, 4, s->nblocks, bs, hi, st->t4lo);
+        else s->tw_f[1](base, es, 4, s->nblocks, bs, s->s, s->tw);
+    }
+}
+
+static void group_inv_gen(const neon_state *st, double *base, uint32_t g) {
+    const nplan *pl = &st->pr;
+    size_t es = st->rowstride;
+    const double *hi = st->t4hi + 2 * (size_t)g * st->R;
+    for (uint32_t i = pl->nst; i-- > 0;) {
+        const stage *s = &pl->st[i];
+        size_t bs = (size_t)s->s * s->p * es;
+        if (s->s == 1) s->dit_t4g(base, es, 4, s->nblocks, bs, hi, st->t4lo);
+        else if (s->dit_tan[1]) s->dit_tan[1](base, es, 4, s->nblocks, bs, s->s, s->twt);
+        else s->dit_tw[1](base, es, 4, s->nblocks, bs, s->s, s->tw);
+    }
+}
+
 static void group_fwd(neon_state *st, double *d, uint32_t g) {
     double *base = (double *)((char *)d + g * 128);
+    if (!st->t4) {
+        group_fwd_gen(st, base, g);
+        return;
+    }
     ptrdiff_t delta = (char *)st->t4 - (char *)d;
     if (!st->sme) {
         plan_fwd(&st->pr, 1, base, st->rowstride, 4, 1, delta);
@@ -752,6 +819,10 @@ static void group_fwd(neon_state *st, double *d, uint32_t g) {
 
 static void group_inv(neon_state *st, double *d, uint32_t g) {
     double *base = (double *)((char *)d + g * 128);
+    if (!st->t4) {
+        group_inv_gen(st, base, g);
+        return;
+    }
     ptrdiff_t delta = (char *)st->t4 - (char *)d;
     if (!st->sme) {
         plan_inv(&st->pr, 1, base, st->rowstride, 4, 1, delta);

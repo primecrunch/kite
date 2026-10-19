@@ -18,7 +18,9 @@
     void kite_##dir##_r##p##_notw_b(double *base, size_t estride, size_t nlg, size_t nblocks,  \
                                    size_t bstride, size_t s, const double *tw);               \
     void kite_##dir##_r##p##_t4_b(double *base, size_t estride, size_t nlg, size_t nblocks,    \
-                                 size_t bstride, ptrdiff_t delta);
+                                 size_t bstride, ptrdiff_t delta);                            \
+    void kite_##dir##_r##p##_t4g_b(double *base, size_t estride, size_t nlg, size_t nblocks,   \
+                                  size_t bstride, const double *hi, const double *lo);
 
 // Tangent-form DIT stages: tw is the kite_tan_table layout (p in 2, 3, 4, 8).
 #define KITE_STAGE_TAN(p)                                                                  \

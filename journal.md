@@ -2186,3 +2186,15 @@ four P cores, all of it on the six E cores, whose added throughput is 7% (64K) t
 with kite. Rosetta's cost shows on the P cores; on the E cores the shared 4 MB L2 decides, and
 kite's per-test footprint is larger (the full-size t4 twiddle table). Blog material: emulation
 overhead is a CPU cost, and on a cache-starved core it stops being the thing that decides speed.
+
+## 2026-10-19 17:30 — four-step twiddles built in the kernels
+
+The full t4 twiddle table (16 bytes per element, read every squaring) roughly doubled a test's
+cache footprint. New `t4g` kernels build row r's twiddle as hi[r] · lo[r][lane-group] with
+by-element FMAs: lo is 20 KB at 240K and shared by every group, hi is 1/8 of the old table. With
+every M4 core busy: −1.8% at 64K, crossover at 192K, +2.2% at 240K, +3.8% at 256K, +5.6% at 400K;
+−1.5% on a single test at every size. Default: generated from FFT 192K. Against PRST at 10 tests,
+240K goes 0.99× → 1.01× and 256K 0.96× → 0.985×. The earlier scratch-buffer version lost 2–4% for
+the store and reload. Full 2009·2^3322280−1 matches its certificate residue (max error 0.164).
+It is a small part of the E-core shortfall; the size-independent ~7% is untouched.
+`docs/results/t4-generated-2026-10-19.md`.
