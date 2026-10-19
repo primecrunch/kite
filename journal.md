@@ -2198,3 +2198,13 @@ every M4 core busy: −1.8% at 64K, crossover at 192K, +2.2% at 240K, +3.8% at 2
 the store and reload. Full 2009·2^3322280−1 matches its certificate residue (max error 0.164).
 It is a small part of the E-core shortfall; the size-independent ~7% is untouched.
 `docs/results/t4-generated-2026-10-19.md`.
+
+## 2026-10-19 21:00 — E-core diagnosis: not misses, not pipes
+
+Measured with the M4's own counters (`tools/pmc/`, `docs/results/e-core-diagnosis-2026-10-19.md`).
+kite does 21% less vector arithmetic and 38% fewer vector loads per squaring than PRST, has fewer
+L1 misses of every kind, and still needs as many cycles: its instructions issue at 1.86 per cycle
+on an E core against PRST's 2.52, so the M4's E cores are not limited to the M1's two pipes.
+Removing radix 8 (fewer live registers) costs 5–6%. The kernels that lose most on E cores are the
+ones that start each pass. Blog material: an emulated engine doing 26% more work at higher IPC,
+level with a native one doing less; instruction counts and cache misses both pointed the wrong way.

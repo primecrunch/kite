@@ -1,0 +1,28 @@
+time samples 442367 joined 442352 counter samples 442367
+samples P 179313 E 263039; slides found for 10/10 pids
+function                                     P%     E% E/P share
+_kite_dit_r8_t4g_b                         8.87  10.29      1.16
+_kite_norm_av                             10.17   8.71      0.86
+_kite_split_sq                             9.41   7.65      0.81
+_kite_dif_r8_t4g_b                         8.60   8.07      0.94
+_kite_dif_r4_rows                          5.89   7.57      1.28
+_kite_dif_r8                               6.02   5.80      0.96
+_kite_dit_r4_rows_tan                      5.07   6.09      1.20
+_kite_dif_r8_b                             5.96   5.33      0.89
+_kite_dit_r8_tan                           4.88   5.85      1.20
+_kite_dit_r8_tan_b                         4.87   5.53      1.13
+_kite_dit_r5_notw                          4.22   4.21      1.00
+_kite_dif_r5_notw                          4.21   4.20      1.00
+_kite_dit_r4_tan                           3.96   4.19      1.06
+_kite_dif_r3_b                             4.32   3.85      0.89
+_kite_dif_r4                               4.23   3.80      0.90
+_kite_dit_r3_tan_b                         3.84   3.67      0.96
+_kite_norm_ave                             3.94   3.27      0.83
+_pass2_job                                 0.34   0.53      1.58
+(system libraries)                         0.32   0.37      1.17
+_kite_norm_cv                              0.12   0.14      1.12
+_group_inv                                 0.03   0.17      5.59
+_kite_norm_bv                              0.13   0.10      0.79
+_neon_from_digits                          0.09   0.12      1.32
+_pass1_a                                   0.11   0.09      0.88
+_neon_to_digits                            0.08   0.05      0.65
