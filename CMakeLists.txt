@@ -102,3 +102,7 @@ target_link_libraries(kbench kitelib)
 
 add_executable(xcheck tools/xcheck.c)
 target_link_libraries(xcheck kitelib)
+
+add_executable(kloop tools/kloop.c)
+target_include_directories(kloop PRIVATE src)
+target_link_libraries(kloop kitelib)

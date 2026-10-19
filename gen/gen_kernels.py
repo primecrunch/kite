@@ -390,14 +390,15 @@ def cmul_vec(f, y, w, conj):
     return t
 
 
-SAVE = """\tstp d8, d9, [sp, #-128]!
+SAVE = """\tstp d8, d9, [sp, #-144]!
 \tstp d10, d11, [sp, #16]
 \tstp d12, d13, [sp, #32]
 \tstp d14, d15, [sp, #48]
 \tstp x19, x20, [sp, #64]
 \tstp x21, x22, [sp, #80]
 \tstp x23, x24, [sp, #96]
-\tstp x25, x26, [sp, #112]"""
+\tstp x25, x26, [sp, #112]
+\tstp x27, x28, [sp, #128]"""
 
 RESTORE = """\tldp d10, d11, [sp, #16]
 \tldp d12, d13, [sp, #32]
@@ -406,7 +407,8 @@ RESTORE = """\tldp d10, d11, [sp, #16]
 \tldp x21, x22, [sp, #80]
 \tldp x23, x24, [sp, #96]
 \tldp x25, x26, [sp, #112]
-\tldp d8, d9, [sp], #128"""
+\tldp x27, x28, [sp, #128]
+\tldp d8, d9, [sp], #144"""
 
 
 def const_table(g, name, vals):
@@ -426,6 +428,19 @@ def ldc(g, c, addr, layout):
     else:
         g.emit("ldr %s, [%s]" % (q(c[0]), addr))
         g.emit("ldr %s, [%s, #%d]" % (q(c[1]), addr, imoff))
+
+
+def ldc_off(g, c, off, wb=("x12", "x26")):
+    """Layout b element at (re base, im base) + register offset off ("xzr" for none)."""
+    for k in range(2):
+        g.emit("ldr %s, [%s, %s]" % (q(c[k]), wb[k], off) if off != "xzr" else
+               "ldr %s, [%s]" % (q(c[k]), wb[k]))
+
+
+def stc_off(g, c, off, wb=("x12", "x26")):
+    for k in range(2):
+        g.emit("str %s, [%s, %s]" % (q(c[k]), wb[k], off) if off != "xzr" else
+               "str %s, [%s]" % (q(c[k]), wb[k]))
 
 
 def stc(g, c, addr, layout):
@@ -529,19 +544,31 @@ def gen_stage(g, p, direction, mode, layout="a"):
 
     R = Regs(avail)
     f = Fft(g, R, sign)
+    regoff = layout == "b"  # register-offset loads and stores: no address add per element
+    if regoff:
+        g.emit("add x26, x12, #%d" % LAYOUT[layout][0])
+        if mode == "t4":
+            g.emit("add x27, x12, x6")
+            g.emit("add x28, x27, #%d" % LAYOUT[layout][0])
     x = []
     for t in range(p):
         c = R.cx()
-        g.emit("add x14, x12, %s" % offregs[t])
-        ldc(g, c, "x14", layout)
+        if regoff:
+            ldc_off(g, c, offregs[t])
+        else:
+            g.emit("add x14, x12, %s" % offregs[t])
+            ldc(g, c, "x14", layout)
         if direction == "dit" and t > 0 and mode == "tw":
             c = cmul_tw(f, c, twregs[t - 1], conj=True)
         if mode == "tan" and t > 0:
             c = tan_mul(f, c, "v%d.d[%d]" % (twregs[(t - 1) // 2], (t - 1) % 2))
         if direction == "dit" and mode == "t4":
             w = R.cx()
-            g.emit("add x15, x14, x6")
-            ldc(g, w, "x15", layout)
+            if regoff:
+                ldc_off(g, w, offregs[t], ("x27", "x28"))
+            else:
+                g.emit("add x15, x14, x6")
+                ldc(g, w, "x15", layout)
             c = cmul_vec(f, c, w, conj=True)
         if direction == "dit" and mode == "t4g":
             c = cmul_vec(f, c, t4g_twiddle(f, t, layout), conj=True)
@@ -550,15 +577,22 @@ def gen_stage(g, p, direction, mode, layout="a"):
     def store(t, y):
         if direction == "dif" and t > 0 and mode == "tw":
             y = cmul_tw(f, y, twregs[t - 1], conj=False)
-        g.emit("add x14, x12, %s" % offregs[t])
+        if not regoff:
+            g.emit("add x14, x12, %s" % offregs[t])
         if direction == "dif" and mode == "t4":
             w = R.cx()
-            g.emit("add x15, x14, x6")
-            ldc(g, w, "x15", layout)
+            if regoff:
+                ldc_off(g, w, offregs[t], ("x27", "x28"))
+            else:
+                g.emit("add x15, x14, x6")
+                ldc(g, w, "x15", layout)
             y = cmul_vec(f, y, w, conj=False)
         if direction == "dif" and mode == "t4g":
             y = cmul_vec(f, y, t4g_twiddle(f, t, layout), conj=False)
-        stc(g, y, "x14", layout)
+        if regoff:
+            stc_off(g, y, offregs[t])
+        else:
+            stc(g, y, "x14", layout)
         R.putcx(y)
 
     if mode == "tan":

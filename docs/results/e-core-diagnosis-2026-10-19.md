@@ -30,3 +30,26 @@ So kite's code issues fewer instructions per cycle than gwnum's, most on E cores
 inside the kernels that start each pass (dependency chains, store-to-load ordering, or the
 layout-b loads), not misses or pipe count. Next: per-kernel IPC on E cores, and the bottleneck
 category (delivery / processing / discarded) for those kernels.
+
+## Per kernel, in isolation (`tools/kloop.c`, 10 copies, L1-resident data)
+
+| Kernel | IPC P | IPC E | E/P |
+|---|--:|--:|--:|
+| dit_r8_tan | 8.22 | 3.49 | 0.42 |
+| dit_r4_rows_tan | 8.94 | 3.86 | 0.43 |
+| dit_r8_tan_b | 8.76 | 3.93 | 0.45 |
+| dif_r4_rows | 7.56 | 3.75 | 0.50 |
+| dit_r8_t4g_b | 6.51 | 3.31 | 0.51 |
+| dif_r8 | 6.12 | 3.18 | 0.52 |
+| dif_r8_b | 6.51 | 3.61 | 0.55 |
+| dif_r8_t4g_b | 6.57 | 3.65 | 0.56 |
+| split_sq | 4.81 | 3.12 | 0.65 |
+
+E cores stay near 3–4 instructions per cycle in every kernel; P cores reach 8–9 on the tangent
+kernels, where 21% of instructions are vector `mov`s (eliminated at rename on P cores).
+
+**Register-offset addressing** in the layout-b stage kernels (`ldr q, [x12, off]`, the imaginary
+half from a second base 64 bytes on) removes 15 of 17 address adds per loop in pass 1
+(`dit_r8_tan_b` 148 → 133 instructions). Measured against 0.1.14, ABBA, 60 s: 1 test −0.3 to
++0.1%; 10 tests +0.4% (240K, 256K), +0.6% (400K). So the E cores are not bound by instruction
+count: the integer adds ran on otherwise idle integer pipes. Kept: correct and slightly faster.

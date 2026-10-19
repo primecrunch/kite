@@ -2208,3 +2208,11 @@ on an E core against PRST's 2.52, so the M4's E cores are not limited to the M1'
 Removing radix 8 (fewer live registers) costs 5–6%. The kernels that lose most on E cores are the
 ones that start each pass. Blog material: an emulated engine doing 26% more work at higher IPC,
 level with a native one doing less; instruction counts and cache misses both pointed the wrong way.
+
+## 2026-10-19 22:30 — kite 0.1.15: register-offset addressing
+
+Isolated kernels (`tools/kloop.c`) top out near 3–4 IPC on M4 E cores against 8–9 on P cores.
+Removing the per-element address adds in pass 1 (15 of 17 per loop) gained only 0.4–0.6% at
+10 tests: E cores are not instruction-count bound, and the vector `mov`s FMA butterflies need have
+no cheaper form. Suite 24/24 (run on eagle). The E-core gap (~10% per E-core second) stays; closing
+it would mean rescheduling the FFT kernels' vector code, not a table or addressing change.
