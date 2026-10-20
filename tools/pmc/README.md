@@ -16,6 +16,7 @@ PID (never by pattern, so a crunch client is left alone).
 | `xtrecord.sh ENGINE TEMPLATE OUT` | starts an xctrace recording, then 10 tests, and records each test's load address with vmmap (`OUT.slides`) | yes |
 | `xtsym.py TS.xml CC.xml SYMS PROC SLIDES` | joins xctrace time samples to core type and symbolises leaf PCs (`nm -n` output as SYMS) | no |
 | `xtcols.py CC.xml PROC` | per-sample deltas of the raw counter columns (0 = cycles, 1 = instructions) | no |
+| `../pipeprobe.c` | cycles per iteration of short instruction mixes (FMA, fadd, fmul, mov, loads, stores) on P and E cores; run under `taskpolicy -b` for E | no |
 | `../kloop.c` | one kernel in a loop on L1-resident data at the 240K shape; run 10 copies, then read the P/E split | no |
 
 xctrace needs Xcode (`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`), its licence

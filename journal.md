@@ -2216,3 +2216,31 @@ Removing the per-element address adds in pass 1 (15 of 17 per loop) gained only 
 10 tests: E cores are not instruction-count bound, and the vector `mov`s FMA butterflies need have
 no cheaper form. Suite 24/24 (run on eagle). The E-core gap (~10% per E-core second) stays; closing
 it would mean rescheduling the FFT kernels' vector code, not a table or addressing change.
+
+## 2026-10-20 22:20 — E-core pipes, mul-form butterflies and early stores (investigation 7)
+
+What an M4 / M4 Pro E core can issue, from `tools/pipeprobe.c` (register-only loops, quiet eagle,
+the same on wolf): three FP pipes; fadd/fsub on all three, fmul and FMA on only two. FMA latency
+4 cycles on E, about 3 on P. Vector `mov` costs nothing on either core type (12 FMAs + 6 movs run as
+fast as the 12 FMAs alone), so the 21% `mov`s in the tangent kernels are not the E-core problem.
+Stores: the E core writes 16 bytes a cycle, `str q` or `stp q` alike; P writes 32. Loads run
+at two or more a cycle on both and do not compete with stores.
+
+The tangent DIT kernels are almost all FMA (`dit_r8_tan_b`: 62 multiplies, 4 adds per butterfly), so
+the two multiply pipes bound an E core at 31 cycles per radix-8 butterfly; it measures 38.
+Mul-form butterflies (fmul + fadd/fsub in place of copy + two FMAs, moving work to the third pipe)
+were slower on both core types: E +3–4%, P +9–23%. The longer chain (fmul then fadd, 7 cycles,
+against one FMA, 4) costs more than the freed pipe gives. Unrolling the 4-iteration lane-group
+loop: nothing.
+
+Removing the stores (a debug build) took 12% off the kernel on E and 1.7% on P. The kernels
+emitted all 16 stores at the end of each butterfly; storing each output as soon as it is made
+(bit-identical results) gave, per call on L1-resident data: E −4 to −6.5% for the radix-8 tw and
+tan kernels, P −1 to +1%. Over whole tests it did not show: 10 tests on eagle, ABBA, 90 s,
+240K 1.3008 → 1.3004 ms/sq, 384K 2.0715 → 2.0682. The isolated kernel gain does not survive real
+data sizes and full load. Suite 24/24 on the early-store build (eagle).
+
+Blog material: a small loop-per-instruction-mix probe answers "is this a pipe limit?" in
+seconds, and here it overturned the obvious explanation twice (movs, then multiply pipes).
+Isolated-kernel wins still have to be confirmed at full load: a 5% per-call gain measured
+nothing over whole tests.

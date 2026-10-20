@@ -233,6 +233,11 @@ PRST's 2.52.
 - Bound: the ~10% per E-core second, about 5% overall on eagle, less on wolf.
 - Exit: a kernel variant that raises E-core IPC in `kloop` and shows at 10 tests, or a measured
   reason the E cores cannot do better on this code.
+- Status 2026-10-20: E cores have three FP pipes, only two of which multiply; `mov` is free;
+  stores go at 16 B/cycle. Mul-form butterflies lose on both core types; unrolling does nothing;
+  storing outputs early gains 4–6.5% per call on E in `kloop` but 0.0% (240K) and 0.16% (384K)
+  over 10 whole tests on eagle (journal, 2026-10-20 22:20). No further idea in this area clears
+  the 10-test noise (~1%); parked.
 
 ## 8. Four-pair pattern normaliser
 
