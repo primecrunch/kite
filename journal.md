@@ -2298,3 +2298,27 @@ which would cancel their lower floor) and the memory system under load. Not sett
 Blog material: a pipe-count model built from real counters gave a clean, testable prediction
 (plain kernels win on E cores) and one environment variable falsified it in half an hour. Cheap
 falsification before writing a core-type dispatcher.
+
+## 2026-10-21 21:40 — Pass 2 without the row copies (investigation 9): bound 4.5%, realisable part unknown
+
+The row copies are already fused into pass 2's first and last radix-4 stages (`dif_r4_rows`,
+`dit_r4_rows_tan`), so an in-place pass 2 cannot drop the loads and stores of the main array; it
+can drop the transposes and the layout-a scratch (both in L1).
+
+Bound (deliberately wrong build, not committed): those two stages run on the scratch alone, so
+pass 2 never reads or writes the main array (it then never changes the data, so the numbers stay
+bounded; the scratch goes to inf/NaN, which costs nothing extra on ARM). eagle, 2009·2^3322280−1
+(240K): one test 670.6 → 636.4 µs per squaring (−5.1%; rows in 39.4 → 27.9 µs, rows out
+34.2 → 25.6). 10 tests, ABBA, 60000 squarings each: 1.2939 → 1.2359 ms (−4.5%).
+
+That bound also removes the main-array traffic, which no in-place version can. A second wrong
+build to price that traffic (a separate read loop before stage 0 and a memcpy after the last
+stage) ran slower than the real code (675 → 709 µs alone): the fused kernels get those loads for
+free inside work they do anyway, so a separate loop is no proxy. Pricing it needs the in-place
+first stage itself. What #9 can realise is somewhere below 4.5% under load; the work is new
+layout-b row kernels for every pass-2 stage and the split, and a reworked pass 2.
+
+Blog material: a bound that removes more than the change could is cheap and conclusive only
+when it comes back small. When it comes back at 4.5%, the question moves to what share of it is
+removable, and the obvious way to measure that (add the unavoidable traffic back as a separate
+loop) overstates it, because fused kernels hide loads inside their own arithmetic.

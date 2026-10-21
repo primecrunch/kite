@@ -258,6 +258,10 @@ Pass 2 copies each row pair into a layout-a scratch, transforms it there and cop
 (`dif_r4_rows`, `dit_r4_rows_tan`, about 11–13% of the time at 240K). Working in place in layout b
 would remove the copies. A few percent at most and uncertain, now that L1 traffic is ruled out as
 the E-core limit; larger work (new kernel layouts and a reworked pass 2).
+- Status 2026-10-21: upper bound 4.5% at 10 tests on eagle (240K), 5.1% alone, from a build
+  that skips the main array in pass 2 altogether. The row copies are already fused into the first
+  and last stages, so an in-place pass 2 keeps those loads and stores; the removable share of the
+  4.5% is unmeasured (journal, 2026-10-21 21:40).
 
 ## Proposals, 2026-10-19 (0.1.15), in order
 
