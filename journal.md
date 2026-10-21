@@ -2244,3 +2244,29 @@ Blog material: a small loop-per-instruction-mix probe answers "is this a pipe li
 seconds, and here it overturned the obvious explanation twice (movs, then multiply pipes).
 Isolated-kernel wins still have to be confirmed at full load: a 5% per-call gain measured
 nothing over whole tests.
+
+## 2026-10-21 20:22 — Four-pair pattern normaliser (investigation 8): dropped
+
+The pattern normaliser ran one or two row pairs per call (kernels `u`, `v`); the table path
+already had four. A four-pair pattern kernel (`w`) needs all 32 vector registers: 16 digits, 4
+carries, and each pair's A and IA (8), which the table path does not carry. It fits by rounding
+into the osc register (dead after its multiply), taking the round-off error in the digit
+register, and using each pair's digit-3 register as the fourth transpose temporary. The `u`/`v`
+kernels came out byte-identical.
+
+Correct: residues match the reference backend at 49K, 256K and a 400K-class length; maxerr
+unchanged (0.1094 at 256K for two pairs, four pairs and HEAD); suite 24/24 on wolf and eagle.
+
+Speed: one test alone on eagle, 256K, the normalise phase went from 113.2 to 108.9 µs per
+squaring (−3.8%), the whole squaring −0.7% (normalise is 16% of it). 10 tests on eagle, ABBA,
+90 s per run, ms per squaring against HEAD: 240K 1.2898 → 1.2870 (−0.2%), 256K 1.3464 → 1.3427
+(−0.3%), 384K 2.0808 → 2.0873 (+0.3%). Inside the ~1% noise, so dropped under the 3% rule; the
+code was not committed.
+
+The 1.5% estimate assumed the normaliser stays limited by carry-chain latency under load, as
+it is alone. The level result suggests it is limited by something else with every core busy,
+most likely the row loads and stores competing for the shared L2 and memory; not measured.
+
+Blog material: the same lesson as the early-store change the day before. A gain measured on one
+core (here 3.8% of one phase) says little about a machine with every core busy, and the
+phase's share of the whole (16%) caps the gain before anything else.

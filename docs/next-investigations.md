@@ -244,6 +244,10 @@ PRST's 2.52.
 The pattern normaliser handles one or two row pairs per loop (P = 1, 2). Four pairs per loop
 gives more independent carry chains. Expected about 1.5%, well understood; the bit-identical check
 (same residues and max error) applies.
+- Status 2026-10-21: built and measured, dropped. Bit-identical; the normalise phase is 3.8%
+  faster alone (0.7% of a squaring) and level at 10 tests on eagle (240K −0.2%, 256K −0.3%,
+  384K +0.3%; journal, 2026-10-21 20:22). Under load something other than the carry chains
+  limits it (memory traffic is the likely candidate, not measured).
 
 ## 9. Pass 2 without the row copies
 
@@ -258,5 +262,6 @@ the E-core limit; larger work (new kernel layouts and a reworked pass 2).
    Largest gain; a primecrunch decision.
 2. The GPU at production sizes on desktop Macs (5). +13% measured at 32K on eagle; substantial work.
 3. Vector scheduling for the E cores (7). Up to ~5% on eagle; uncertain.
-4. Four-pair normaliser (8), about 1.5%; pass 2 in place (9), a few percent, uncertain.
+4. Pass 2 in place (9), a few percent, uncertain. (Four-pair normaliser (8): measured level
+   under load, dropped 2026-10-21.)
 5. Engine choice per FFT size (4), only if production data shows a size where PRST wins.
