@@ -238,6 +238,9 @@ PRST's 2.52.
   storing outputs early gains 4–6.5% per call on E in `kloop` but 0.0% (240K) and 0.16% (384K)
   over 10 whole tests on eagle (journal, 2026-10-20 22:20). No further idea in this area clears
   the 10-test noise (~1%); parked.
+- 2026-10-21: the multiply-pipe floor is not the limit either. The plain DIT kernels
+  (`KITE_NO_TAN=1`) have a lower E-core issue floor than the tangent ones but measured level on
+  E cores only and 1.7–1.8% slower at 10 tests (journal, 2026-10-21 21:05).
 
 ## 8. Four-pair pattern normaliser
 

@@ -2270,3 +2270,31 @@ most likely the row loads and stores competing for the shared L2 and memory; not
 Blog material: the same lesson as the early-store change the day before. A gain measured on one
 core (here 3.8% of one phase) says little about a machine with every core busy, and the
 phase's share of the whole (16%) caps the gain before anything else.
+
+## 2026-10-21 21:05 — E cores: the multiply-pipe floor does not bind; tangent kernels stay
+
+Hypothesis from the 2026-10-19 counters: kite issues 11.2M vector instructions per squaring at
+1.86 per cycle on an E core (~6.0M cycles), and nearly all of the tangent DIT kernels' FP
+instructions are multiplies or FMAs (`dit_r8_tan` 62 of 66, `dit_r4_rows_tan` 44 of 44), which
+an E core issues on only two of its three FP pipes. Counted from the generated asm, the issue
+floor per kernel body (E: max(mul/2, all/3); P: all/4) favours the plain forms on E and the
+tangent forms on P: `dit_r8` 28.0 against `dit_r8_tan` 31.0 cycles on E, 21.0 against 16.5 on P;
+`dit_r4_rows` 18.7 against `dit_r4_rows_tan` 22.0 on E, 14.0 against 11.0 on P. If E cores sat on
+that floor, the plain kernels (`KITE_NO_TAN=1`) would gain there.
+
+Measured on eagle, kite HEAD, ABBA, 90 s, ms per squaring, tangent → plain:
+- 1 test: 240K 0.6650 → 0.6850 (+3.0%), 256K 0.6920 → 0.7120 (+2.9%)
+- 10 tests: 240K 1.2873 → 1.3102 (+1.8%), 256K 1.3520 → 1.3755 (+1.7%)
+- 6 tests on the E cores only (`taskpolicy -b`, 240K): 5.400 → 5.389 and 5.466; level within
+  the noise (one tangent run read 7.03, a background-QoS clock change, left out)
+
+So plain gains nothing on E cores and loses ~3% on P cores; the tangent kernels stay. kite on an E
+core is not limited by its two multiply pipes in whole tests, which agrees with the mul-form
+result (2026-10-20): moving work off the multiply pipes did not help either. Together with
+misses, instruction count, register pressure and stores, the remaining suspects are latency
+under the E core's smaller out-of-order window (the plain forms have longer dependent chains,
+which would cancel their lower floor) and the memory system under load. Not settled.
+
+Blog material: a pipe-count model built from real counters gave a clean, testable prediction
+(plain kernels win on E cores) and one environment variable falsified it in half an hour. Cheap
+falsification before writing a core-type dispatcher.
