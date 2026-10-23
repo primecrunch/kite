@@ -2429,3 +2429,24 @@ s = 1 stage and the split. #9 in the transposing form is dropped.
 Blog material: a copy into a scratch buffer looks like overhead to remove, and the bound for
 removing it (1.2–1.7%) said so; pricing what the copy-free design has to do instead turned that
 into an 8% loss. A bound only prices what goes away.
+
+## 2026-10-23 20:15 — Pass 2 in place, columns-in-lanes form: reasoned out, #9 closed
+
+Not built or measured; the argument decided it.
+
+- A row FFT of length C has one stage with stride 1, which combines adjacent elements. With
+  columns q, q+1 in the lanes, that stage needs cross-lane shuffles in and out, the same count of
+  transposes the first and last stages pay now, only moved next to the split. Fused with the split
+  it at best equals today's count; unfused it doubles it.
+- Pass 1 needs the two lanes of a vector in different columns, pass 2 in different rows (p, p').
+  With row-major storage the data has to be re-paired between the passes, and the current design
+  does it the minimum number of times, once into and once out of pass 2, fused into loads and
+  stores it makes anyway.
+- Per-lane radix-8 tangent twiddles need 16 vector registers beside the 16 data registers. The
+  plain forms instead cost 1.7–1.8% at 10 tests (2026-10-21 21:05).
+
+So this form is level on transposes and about 1.7% behind on twiddles before any new kernel. #9 is
+closed in both forms. The one layout not ruled out pairs (row p, column q) with (row p', column
+q+1) in a vector, so the lanes are in different FFTs in both passes; it needs per-lane twiddles
+and leaves the rows a column apart at the stride-1 stage. Unexamined, and a redesign of both
+passes: research, not a next step.

@@ -279,7 +279,9 @@ the E-core limit; larger work (new kernel layouts and a reworked pass 2).
   gain is the bound less the transposes or per-lane twiddles the middle stages gain, unknown.
 - 2026-10-23: transposing form dropped. Emulated (row-kernel transposes removed, middle stages
   and split given theirs) it is 8.3% slower at 240K and 8.5% at 256K, ABBAABBA on eagle, no
-  overlap (journal, 2026-10-23 19:58). The columns-in-lanes form (per-lane twiddles) is unpriced.
+  overlap (journal, 2026-10-23 19:58). Columns-in-lanes form closed by argument: its stride-1
+  stage needs the same transposes, and per-lane tangent twiddles do not fit in registers (journal,
+  2026-10-23 20:15). #9 closed.
 
 ## Proposals, 2026-10-19 (0.1.15), in order
 
@@ -288,7 +290,7 @@ the E-core limit; larger work (new kernel layouts and a reworked pass 2).
 2. The GPU at production sizes on desktop Macs (5). +13% measured at 32K on eagle; substantial work.
 3. Vector scheduling for the E cores (7). Closed 2026-10-23: scheduling lost, the row-kernel
    unroll it led to gave ~1%.
-4. Pass 2 in place (9). Transposing form 8% slower, dropped (2026-10-23); columns-in-lanes form
-   unpriced. (Four-pair normaliser (8): measured level
+4. Pass 2 in place (9). Closed 2026-10-23: transposing form 8% slower, columns-in-lanes no better
+   by argument. (Four-pair normaliser (8): measured level
    under load, dropped 2026-10-21.)
 5. Engine choice per FFT size (4), only if production data shows a size where PRST wins.
