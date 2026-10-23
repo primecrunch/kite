@@ -277,6 +277,9 @@ the E-core limit; larger work (new kernel layouts and a reworked pass 2).
   at 256K with 10 tests on eagle, against up to 1.5% run-to-run drift (journal, 2026-10-23 19:25).
   Detectable at 240K (every bound run beat every default run), so open under the new rule; the net
   gain is the bound less the transposes or per-lane twiddles the middle stages gain, unknown.
+- 2026-10-23: transposing form dropped. Emulated (row-kernel transposes removed, middle stages
+  and split given theirs) it is 8.3% slower at 240K and 8.5% at 256K, ABBAABBA on eagle, no
+  overlap (journal, 2026-10-23 19:58). The columns-in-lanes form (per-lane twiddles) is unpriced.
 
 ## Proposals, 2026-10-19 (0.1.15), in order
 
@@ -285,6 +288,7 @@ the E-core limit; larger work (new kernel layouts and a reworked pass 2).
 2. The GPU at production sizes on desktop Macs (5). +13% measured at 32K on eagle; substantial work.
 3. Vector scheduling for the E cores (7). Closed 2026-10-23: scheduling lost, the row-kernel
    unroll it led to gave ~1%.
-4. Pass 2 in place (9). Removable part bounded at 1.2–1.7% gross (2026-10-23); large work. (Four-pair normaliser (8): measured level
+4. Pass 2 in place (9). Transposing form 8% slower, dropped (2026-10-23); columns-in-lanes form
+   unpriced. (Four-pair normaliser (8): measured level
    under load, dropped 2026-10-21.)
 5. Engine choice per FFT size (4), only if production data shows a size where PRST wins.

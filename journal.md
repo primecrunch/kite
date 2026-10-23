@@ -2401,3 +2401,31 @@ today's row unroll (+0.8–1.2%) had already been kept below it. Under the new r
 Blog material: price the part of a redesign that can actually go away, not the whole phase it
 touches. The 2026-10-21 bound removed all main-array traffic (4.5%) and made the redesign look
 like a few percent; asking what the new layout would still have to do left 1–2% at most.
+
+## 2026-10-23 19:58 — Pass 2 in place, transposing form: 8% slower, dropped
+
+The cost side of #9, measured with the gain. An emulation build (wrong results, not committed):
+the `_u4` row kernels without their transposes, as in the 19:25 bound, and every layout-a kernel
+pass 2 runs after them (the middle stages and `split_sq`) given the transposes an in-place layout
+needs: per complex element a `trn1`/`trn2` pair on load and another on store, chained on the data.
+Loads stay `ldp` from the scratch, so the emulation is if anything kind to in-place, which would
+need four `ldr` from two rows per element pair. 10 concurrent `kite time --iters 60000` on quiet
+eagle, ABBAABBA, ms per squaring:
+
+| Test | FFT | Default (4 runs) | Emulated in place (4 runs) | Change |
+|---|---|---|---|--:|
+| 2009·2^3322280−1 | 240K | 1.2807–1.3038, mean 1.2915 | 1.3941–1.4013, mean 1.3981 | +8.3% |
+| 6767·2^3322174−1 | 256K | 1.3425–1.3507, mean 1.3447 | 1.4525–1.4636, mean 1.4590 | +8.5% |
+
+No overlap between the two sets at either size. The transposes the middle stages would gain cost
+about 7× what the first and last stages would lose (1.2–1.7%). The scratch exists so that the
+pair transpose happens once per pass instead of once per stage, and it is the cheaper design.
+
+Not measured: the other in-place form, adjacent columns in the lanes, which avoids transposes in
+the stride stages but needs a twiddle per lane (vector twiddle loads per element where pass 2
+now broadcasts one twiddle per butterfly from a register) and in-register transposes in the
+s = 1 stage and the split. #9 in the transposing form is dropped.
+
+Blog material: a copy into a scratch buffer looks like overhead to remove, and the bound for
+removing it (1.2–1.7%) said so; pricing what the copy-free design has to do instead turned that
+into an 8% loss. A bound only prices what goes away.
