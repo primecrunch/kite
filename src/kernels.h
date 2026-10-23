@@ -99,6 +99,10 @@ void kite_cmulc_b(double *base, size_t estride, size_t n, ptrdiff_t delta);
 void kite_dif_r4_rows(const double *rp, const double *rpp, double *scr, size_t C, const double *tw);
 void kite_dit_r4_rows(double *rp, double *rpp, const double *scr, size_t C, const double *tw);
 void kite_dit_r4_rows_tan(double *rp, double *rpp, const double *scr, size_t C, const double *tw);
+// the same, four column pairs per loop iteration; C a multiple of 32
+void kite_dif_r4_rows_u4(const double *rp, const double *rpp, double *scr, size_t C, const double *tw);
+void kite_dit_r4_rows_u4(double *rp, double *rpp, const double *scr, size_t C, const double *tw);
+void kite_dit_r4_rows_tan_u4(double *rp, double *rpp, const double *scr, size_t C, const double *tw);
 void kite_split_sq(double *scr, size_t C, const double *rs, const double *cs);
 
 #endif

@@ -51,6 +51,8 @@ int main(int argc, char **argv) {
             else if (!strcmp(k, "dit_r8_tan_b")) kite_dit_r8_tan_b(grp, 128, 4, 2, 64 * 128, 8, twt);
             else if (!strcmp(k, "dif_r4_rows")) kite_dif_r4_rows(rp, rpp, scr, C, tw);
             else if (!strcmp(k, "dit_r4_rows_tan")) kite_dit_r4_rows_tan(rp, rpp, scr, C, twt);
+            else if (!strcmp(k, "dif_r4_rows_u4")) kite_dif_r4_rows_u4(rp, rpp, scr, C, tw);
+            else if (!strcmp(k, "dit_r4_rows_tan_u4")) kite_dit_r4_rows_tan_u4(rp, rpp, scr, C, twt);
             else if (!strcmp(k, "split_sq")) kite_split_sq(scr, C, rs, cs);
             else if (!strcmp(k, "dif_r8")) kite_dif_r8(scr, 32, 1, C / 64, 64 * 32, 8, tw);
             else if (!strcmp(k, "dit_r8_tan")) kite_dit_r8_tan(scr, 32, 1, C / 64, 64 * 32, 8, twt);

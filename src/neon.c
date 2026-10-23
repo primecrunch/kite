@@ -99,6 +99,7 @@ typedef struct {
 
 typedef struct {
     uint32_t H, R, C, ngroups;
+    int rows_u4;  // pass 2's first and last stages four column pairs per iteration (C % 32 == 0)
     size_t rowstride;  // bytes
     nplan pr, pc;
     double *t4;        // four-step twiddles, same layout as data (NULL: built in the kernels)
@@ -569,6 +570,7 @@ static int neon_init_impl(kite_ctx *ctx, int sme) {
     }
     uint32_t R = st->R, C = st->C, H = st->H;
     st->ngroups = C / G;
+    st->rows_u4 = C % 32 == 0 && !getenv("KITE_NO_U4");
     if (ctx->L - ctx->top_t > 2 * G) return -1;
     st->rowstride = (size_t)C * 16 + 128;
     if (nplan_init(&st->pr, R, 0, ctx->plan_order & 1) ||
@@ -1257,7 +1259,8 @@ static void pass2_job(void *arg, int t, int n) {
         double *rpp = (double *)((char *)d + pp * st->rowstride);
         // first stage fused with the transpose, then the rest of the row FFT
         const stage *s0 = &st->pc.st[0];
-        kite_dif_r4_rows(rp, rpp, s, C, s0->tw);
+        if (st->rows_u4) kite_dif_r4_rows_u4(rp, rpp, s, C, s0->tw);
+        else kite_dif_r4_rows(rp, rpp, s, C, s0->tw);
         PROF_MARK(t, PR_P2_IN);
         for (uint32_t k = 1; k < st->pc.nst; k++) {
             const stage *sk = &st->pc.st[k];
@@ -1285,7 +1288,9 @@ static void pass2_job(void *arg, int t, int n) {
             else sk->dit_tw[0](s, 32, 1, sk->nblocks, bs, sk->s, sk->tw);
         }
         PROF_MARK(t, PR_P2_INV);
-        if (s0->twt) kite_dit_r4_rows_tan(rp, rpp, s, C, s0->twt);
+        if (s0->twt && st->rows_u4) kite_dit_r4_rows_tan_u4(rp, rpp, s, C, s0->twt);
+        else if (s0->twt) kite_dit_r4_rows_tan(rp, rpp, s, C, s0->twt);
+        else if (st->rows_u4) kite_dit_r4_rows_u4(rp, rpp, s, C, s0->tw);
         else kite_dit_r4_rows(rp, rpp, s, C, s0->tw);
         PROF_MARK(t, PR_P2_OUT);
     }

@@ -241,6 +241,13 @@ PRST's 2.52.
 - 2026-10-21: the multiply-pipe floor is not the limit either. The plain DIT kernels
   (`KITE_NO_TAN=1`) have a lower E-core issue floor than the tangent ones but measured level on
   E cores only and 1.7–1.8% slower at 10 tests (journal, 2026-10-21 21:05).
+- 2026-10-23: static scheduling falsified. A critical-path list scheduler in the generator (E-core
+  latencies and pipes) reordered every stage body: E-core IPC in `kloop` −5% (`dit_r8_tan_b`),
+  −1.5% (`dit_r8_tan`), +3% (`dit_r4_rows_tan`), −1% (`dif_r4_rows`); the out-of-order core already
+  finds the overlap. The radix-8 kernels run at 72–81% of the two-multiply-pipe floor in L1. The row
+  kernels were at half their FP floor with ~50 integer address ops per column pair; unrolling
+  four column pairs (`_u4`) cuts that to ~9 and gains 0.8–1.2% over whole tests (journal,
+  2026-10-23 18:55). Closed: nothing left here that a kernel reorder can reach.
 
 ## 8. Four-pair pattern normaliser
 
@@ -268,7 +275,8 @@ the E-core limit; larger work (new kernel layouts and a reworked pass 2).
 1. kite as the default on Apple Silicon (6), after a day of 0.1.15 and a production check.
    Largest gain; a primecrunch decision.
 2. The GPU at production sizes on desktop Macs (5). +13% measured at 32K on eagle; substantial work.
-3. Vector scheduling for the E cores (7). Up to ~5% on eagle; uncertain.
+3. Vector scheduling for the E cores (7). Closed 2026-10-23: scheduling lost, the row-kernel
+   unroll it led to gave ~1%.
 4. Pass 2 in place (9), a few percent, uncertain. (Four-pair normaliser (8): measured level
    under load, dropped 2026-10-21.)
 5. Engine choice per FFT size (4), only if production data shows a size where PRST wins.

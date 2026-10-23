@@ -1029,7 +1029,7 @@ def gen_rows(g):
     E("ret")
 
 
-def gen_rows_stage(g, direction, tan=False):
+def gen_rows_stage(g, direction, tan=False, unroll=1):
     """First row-FFT stage fused with the row-pair transpose (pass 2).
 
     void kite_dif_r4_rows(const double *rp, const double *rpp, double *scr, size_t C,
@@ -1046,10 +1046,15 @@ def gen_rows_stage(g, direction, tan=False):
     C must be a multiple of 8.
     tan (DIT only, suffix _tan): tw is the tangent-form table (kite_tan_table,
     6 scalars per j), as in the 'tan' stage kernels.
+    unroll 4 (suffix _u4): four column pairs per loop iteration. With s a multiple of 8
+    (C a multiple of 32) the 8 columns q_t .. q_t+7 are one 8-column block, so their row
+    offsets are off(q_t) + 8d and the addresses are computed once per iteration.
     """
     E = g.emit
     assert not (tan and direction == "dif")
-    name = "%s%s_r4_rows%s" % (PREFIX, direction, "_tan" if tan else "")
+    assert unroll in (1, 4)
+    name = "%s%s_r4_rows%s%s" % (PREFIX, direction, "_tan" if tan else "",
+                                 "_u4" if unroll == 4 else "")
     fwd = direction == "dif"
     g.out.append("")
     g.out.append(".globl %s" % name)
@@ -1060,29 +1065,62 @@ def gen_rows_stage(g, direction, tan=False):
     E("mov x6, #0")           # j
     twregs = [26, 27, 28, 29, 30, 31]
     g.label("1")
+    if unroll == 4:
+        # q_t = j + t*s; scratch address x2 + 32 q_t in x9+t, row addresses x0/x1 + off(q_t)
+        # in x19+t / x23+t, off(q) = q*8 + (q>>3)*64
+        for t in range(4):
+            E("mov x16, #%d" % t)
+            E("madd x16, x5, x16, x6")
+            E("lsr x17, x16, #3")
+            E("lsl x17, x17, #6")
+            E("add x17, x17, x16, lsl #3")
+            E("add x%d, x2, x16, lsl #5" % (9 + t))
+            E("add x%d, x0, x17" % (19 + t))
+            E("add x%d, x1, x17" % (23 + t))
+    for u in range(unroll):
+        rows_pair(g, fwd, tan, twregs, u if unroll == 4 else None)
+    E("add x6, x6, #%d" % (2 * unroll))
+    E("cmp x6, x5")
+    E("b.lo 1b")
+    g.out.append(RESTORE)
+    E("ret")
+
+
+def rows_pair(g, fwd, tan, twregs, u):
+    """One column pair (j, j+1) of gen_rows_stage; u None: addresses from j (x6), else column
+    pair u of an unrolled iteration (addresses in x9.., x19.., x23..)."""
+    E = g.emit
     for i, r in enumerate(twregs):
         E("ldr q%d, [x4], #16" % r)
-    # row offsets of q_t = j + t*s: off = q*8 + (q>>3)*64 ; scratch offset q*32
-    for t in range(4):
-        E("madd x%d, x5, x%d, x6" % (9 + t, 19 + 0, ) if False else "mov x16, #%d" % t)
-        E("madd x%d, x5, x16, x6" % (9 + t))          # q_t
+    if u is None:
+        # row offsets of q_t = j + t*s: off = q*8 + (q>>3)*64 ; scratch offset q*32
+        for t in range(4):
+            E("mov x16, #%d" % t)
+            E("madd x%d, x5, x16, x6" % (9 + t))          # q_t
     R = Regs([r for r in range(26)])
     f = Fft(g, R, -1 if fwd else 1)
     A, B = [], []
     for t in range(4):
-        qreg = "x%d" % (9 + t)
-        E("lsr x17, %s, #3" % qreg)
-        E("lsl x17, x17, #6")
-        E("add x17, x17, %s, lsl #3" % qreg)         # row byte offset
-        E("lsl x%d, %s, #5" % (19 + t, qreg))         # scratch byte offset
+        if u is None:
+            qreg = "x%d" % (9 + t)
+            E("lsr x17, %s, #3" % qreg)
+            E("lsl x17, x17, #6")
+            E("add x17, x17, %s, lsl #3" % qreg)         # row byte offset
+            E("lsl x%d, %s, #5" % (19 + t, qreg))         # scratch byte offset
         if fwd:
             rp, ip, rq, iq = R.get(), R.get(), R.get(), R.get()
-            E("add x15, x0, x17")
-            E("ldr q%d, [x15]" % rp)
-            E("ldr q%d, [x15, #64]" % ip)
-            E("add x15, x1, x17")
-            E("ldr q%d, [x15]" % rq)
-            E("ldr q%d, [x15, #64]" % iq)
+            if u is None:
+                E("add x15, x0, x17")
+                E("ldr q%d, [x15]" % rp)
+                E("ldr q%d, [x15, #64]" % ip)
+                E("add x15, x1, x17")
+                E("ldr q%d, [x15]" % rq)
+                E("ldr q%d, [x15, #64]" % iq)
+            else:
+                E("ldr q%d, [x%d, #%d]" % (rp, 19 + t, 16 * u))
+                E("ldr q%d, [x%d, #%d]" % (ip, 19 + t, 16 * u + 64))
+                E("ldr q%d, [x%d, #%d]" % (rq, 23 + t, 16 * u))
+                E("ldr q%d, [x%d, #%d]" % (iq, 23 + t, 16 * u + 64))
             a, b = R.cx(), R.cx()
             E("trn1 v%d.2d, v%d.2d, v%d.2d" % (a[0], rp, rq))
             E("trn1 v%d.2d, v%d.2d, v%d.2d" % (a[1], ip, iq))
@@ -1092,9 +1130,13 @@ def gen_rows_stage(g, direction, tan=False):
                 R.put(r)
         else:
             a, b = R.cx(), R.cx()
-            E("add x15, x2, x%d" % (19 + t))
-            E("ldp q%d, q%d, [x15]" % (a[0], a[1]))
-            E("ldp q%d, q%d, [x15, #32]" % (b[0], b[1]))
+            if u is None:
+                E("add x15, x2, x%d" % (19 + t))
+                E("ldp q%d, q%d, [x15]" % (a[0], a[1]))
+                E("ldp q%d, q%d, [x15, #32]" % (b[0], b[1]))
+            else:
+                E("ldp q%d, q%d, [x%d, #%d]" % (a[0], a[1], 9 + t, 64 * u))
+                E("ldp q%d, q%d, [x%d, #%d]" % (b[0], b[1], 9 + t, 64 * u + 32))
             if t > 0 and tan:
                 a = tan_mul(f, a, "v%d.d[%d]" % (twregs[(t - 1) // 2], (t - 1) % 2))
                 b = tan_mul(f, b, "v%d.d[%d]" % (twregs[3 + (t - 1) // 2], (t - 1) % 2))
@@ -1118,35 +1160,41 @@ def gen_rows_stage(g, direction, tan=False):
             if t > 0:
                 a = cmul_tw(f, a, twregs[t - 1], conj=False)
                 b = cmul_tw(f, b, twregs[3 + t - 1], conj=False)
-            E("add x15, x2, x%d" % (19 + t))
-            E("stp q%d, q%d, [x15]" % (a[0], a[1]))
-            E("stp q%d, q%d, [x15, #32]" % (b[0], b[1]))
+            if u is None:
+                E("add x15, x2, x%d" % (19 + t))
+                E("stp q%d, q%d, [x15]" % (a[0], a[1]))
+                E("stp q%d, q%d, [x15, #32]" % (b[0], b[1]))
+            else:
+                E("stp q%d, q%d, [x%d, #%d]" % (a[0], a[1], 9 + t, 64 * u))
+                E("stp q%d, q%d, [x%d, #%d]" % (b[0], b[1], 9 + t, 64 * u + 32))
         else:
-            # recompute the row offset of q_t
-            qreg = "x%d" % (9 + t)
-            E("lsr x17, %s, #3" % qreg)
-            E("lsl x17, x17, #6")
-            E("add x17, x17, %s, lsl #3" % qreg)
+            if u is None:
+                # recompute the row offset of q_t
+                qreg = "x%d" % (9 + t)
+                E("lsr x17, %s, #3" % qreg)
+                E("lsl x17, x17, #6")
+                E("add x17, x17, %s, lsl #3" % qreg)
             rp, ip, rq, iq = R.get(), R.get(), R.get(), R.get()
             E("trn1 v%d.2d, v%d.2d, v%d.2d" % (rp, a[0], b[0]))
             E("trn1 v%d.2d, v%d.2d, v%d.2d" % (ip, a[1], b[1]))
             E("trn2 v%d.2d, v%d.2d, v%d.2d" % (rq, a[0], b[0]))
             E("trn2 v%d.2d, v%d.2d, v%d.2d" % (iq, a[1], b[1]))
-            E("add x15, x0, x17")
-            E("str q%d, [x15]" % rp)
-            E("str q%d, [x15, #64]" % ip)
-            E("add x15, x1, x17")
-            E("str q%d, [x15]" % rq)
-            E("str q%d, [x15, #64]" % iq)
+            if u is None:
+                E("add x15, x0, x17")
+                E("str q%d, [x15]" % rp)
+                E("str q%d, [x15, #64]" % ip)
+                E("add x15, x1, x17")
+                E("str q%d, [x15]" % rq)
+                E("str q%d, [x15, #64]" % iq)
+            else:
+                E("str q%d, [x%d, #%d]" % (rp, 19 + t, 16 * u))
+                E("str q%d, [x%d, #%d]" % (ip, 19 + t, 16 * u + 64))
+                E("str q%d, [x%d, #%d]" % (rq, 23 + t, 16 * u))
+                E("str q%d, [x%d, #%d]" % (iq, 23 + t, 16 * u + 64))
             for r in (rp, ip, rq, iq):
                 R.put(r)
         R.putcx(a)
         R.putcx(b)
-    E("add x6, x6, #2")
-    E("cmp x6, x5")
-    E("b.lo 1b")
-    g.out.append(RESTORE)
-    E("ret")
 
 
 def gen_split_sq(g):
@@ -1415,6 +1463,8 @@ def main():
     gen_rows_stage(g, "dif")
     gen_rows_stage(g, "dit")
     gen_rows_stage(g, "dit", tan=True)
+    for d, tan in (("dif", False), ("dit", False), ("dit", True)):
+        gen_rows_stage(g, d, tan, unroll=4)
     gen_cmul_b(g, False)
     gen_cmul_b(g, True)
     write(outdir, "pass2.S", g)

@@ -2322,3 +2322,47 @@ Blog material: a bound that removes more than the change could is cheap and conc
 when it comes back small. When it comes back at 4.5%, the question moves to what share of it is
 removable, and the obvious way to measure that (add the unavoidable traffic back as a separate
 loop) overstates it, because fused kernels hide loads inside their own arithmetic.
+
+## 2026-10-23 18:55 — E-core scheduling (investigation 7): reordering loses, unrolling the row kernels gives ~1%
+
+**Static scheduling.** A list scheduler in `gen_kernels.py` reordered each stage body by
+critical-path height under an E-core model (FMA 4 cycles, add 3, load 4, `mov` free; three FP
+pipes of which two multiply, two loads, one store, four issues per cycle), keeping RAW/WAR/WAW
+order on registers and load/store order. Radix-8 tangent bodies have no room for a second
+lane-group (16 data registers plus 8 of scalars), so this was the form of "two independent chains"
+that fits. `kloop`, 10 copies on eagle under crunch load, ABBA, E-core IPC base → scheduled:
+`dit_r8_tan_b` 3.68 → 3.49, `dit_r8_tan` 3.49 → 3.44, `dit_r4_rows_tan` 3.83 → 3.95,
+`dif_r4_rows` 3.73 → 3.70; P cores level. Runs repeat within 0.02. The out-of-order core already
+overlaps the chains, and a fixed order tuned for one latency model can only get in its way. The
+scheduler was not committed.
+
+**What does limit them.** `pipeprobe` `add12_ld8` runs 22 instructions in 4.25 cycles on an E
+core, so the front end issues at least 5 a cycle and 3.5–3.9 IPC is not a width limit. Cycles
+per iteration in L1 against the pipe floors: `dit_r8_tan_b` 38.3 against 31 (two multiply pipes),
+`dit_r8_tan` 43.3 against 31, `dit_r4_rows_tan` 43.5 against 22, `dif_r4_rows` 38.6 against 24
+(three FP pipes). The row kernels recompute off(q) = 8q + 64(q>>3) and the scratch offset for
+every element: ~50 integer instructions per column pair.
+
+**Row kernels unrolled four column pairs (`_u4`).** With s = C/4 a multiple of 8 (C % 32 == 0,
+true at 240K and 256K) the 8 columns of one iteration are one 8-column block, so row addresses
+are off(q_t) + 8d: computed once per iteration, immediate offsets after that. `neon.c` uses them
+when C % 32 == 0; `KITE_NO_U4=1` turns them off. Instructions per call −25%; E cycles per call
+−8% (`dit_r4_rows_tan`, 4161 → 3821) and −9% (`dif_r4_rows`, 3584 → 3266), P −11% and +1%.
+Residues: suite 23/23 on eagle; `xcheck` 300 squarings of 2009·2^3322280−1 against the reference
+backend at 240K and 256K, full residue SAME, u4 on and off.
+
+Whole tests, eagle quiet (crunch stopped), 10 tests, 90 s, ABBA, mean ms per squaring:
+
+| Test | FFT | u4 | no u4 | Change |
+|---|---|--:|--:|--:|
+| 2009·2^3322280−1 | 240K | 1.2727, 1.2743 | 1.2901, 1.2889 | −1.2% |
+| 6767·2^3322174−1 | 256K | 1.3294, 1.3314 | 1.3441, 1.3393 | −0.8% |
+
+At 240K every u4 test (max 1.2800) beat every no-u4 test (min 1.2840). Small but consistent, and
+in line with the kernels' ~11% share times their ~8–9% gain. Kept on by default, as 0.1.15's
+register-offset change was. Investigation 7 is closed.
+
+Blog material: a scheduler that models the core's pipes and latencies made the code slower on
+the core it modelled. Static order matters little to an out-of-order core; instruction count
+still does, and the cheap win was the integer address arithmetic nobody had counted because the
+analysis had been about vector pipes.
