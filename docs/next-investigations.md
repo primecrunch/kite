@@ -5,7 +5,8 @@ tests per hour on an M4 (4P + 6E) and 0.91–1.00× on an M4 Pro (10P + 4E)
 (`docs/results/load-bench-2026-10-18-*-0.1.9.md`). With one test alone it is 4–10% behind
 from FFT 160K up. Three areas account for that gap. Each starts with a measurement that bounds
 what it could gain, under the rules in `docs/large-fft-plan.md`: production sizes, every core
-busy, a step dropped below 3%.
+busy, a step dropped below 3% (since 2026-10-23: dropped only when its bound is too small to
+detect; see the rules there).
 
 | Area | Where it costs | Size of the prize | Kind of work |
 |---|---|---|---|
@@ -269,6 +270,13 @@ the E-core limit; larger work (new kernel layouts and a reworked pass 2).
   that skips the main array in pass 2 altogether. The row copies are already fused into the first
   and last stages, so an in-place pass 2 keeps those loads and stores; the removable share of the
   4.5% is unmeasured (journal, 2026-10-21 21:40).
+- 2026-10-23: bounded. Pass 2 must keep rows p and p' in one vector (the split pairs them), so an
+  in-place pass 2 still transposes on every load and store, now in every stage, or puts columns in
+  the lanes and needs per-lane twiddles. What it can remove is the first and last stages'
+  transposes: a build without them (wrong results, `_u4` kernels) is 1.2% faster at 240K and 1.7%
+  at 256K with 10 tests on eagle, against up to 1.5% run-to-run drift (journal, 2026-10-23 19:25).
+  Detectable at 240K (every bound run beat every default run), so open under the new rule; the net
+  gain is the bound less the transposes or per-lane twiddles the middle stages gain, unknown.
 
 ## Proposals, 2026-10-19 (0.1.15), in order
 
@@ -277,6 +285,6 @@ the E-core limit; larger work (new kernel layouts and a reworked pass 2).
 2. The GPU at production sizes on desktop Macs (5). +13% measured at 32K on eagle; substantial work.
 3. Vector scheduling for the E cores (7). Closed 2026-10-23: scheduling lost, the row-kernel
    unroll it led to gave ~1%.
-4. Pass 2 in place (9), a few percent, uncertain. (Four-pair normaliser (8): measured level
+4. Pass 2 in place (9). Removable part bounded at 1.2–1.7% gross (2026-10-23); large work. (Four-pair normaliser (8): measured level
    under load, dropped 2026-10-21.)
 5. Engine choice per FFT size (4), only if production data shows a size where PRST wins.

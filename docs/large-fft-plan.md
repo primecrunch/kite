@@ -51,7 +51,10 @@ These are the rules from `speed-improvement-priorities.md`, with one change: eve
 runs with all cores busy at a production size. A one-core figure is recorded but decides nothing.
 
 - Each step gets an upper bound first: a deliberately wrong build or an existing switch that skips
-  the work. A step is dropped if its bound is under 3%.
+  the work. A step is dropped only if its bound is too small to detect. Detectable: across ABBA repeats
+  every run of one build beats every run of the other, or the means differ by more than twice the
+  spread between repeats of the same build. Near the noise, add repeats (ABBAABBA, longer runs)
+  rather than drop the step. (Until 2026-10-23 the bar was a 3% bound.)
 - Measure on eagle and on wolf, both quiet (`tools/quiet.sh check`), under `caffeinate -i`.
 - Report 10 tests on eagle and 14 on wolf, at FFT 128K, 256K and 384K. Run PRST the same way in
   the same session.

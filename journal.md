@@ -2366,3 +2366,38 @@ Blog material: a scheduler that models the core's pipes and latencies made the c
 the core it modelled. Static order matters little to an out-of-order core; instruction count
 still does, and the cheap win was the integer address arithmetic nobody had counted because the
 analysis had been about vector pipes.
+
+## 2026-10-23 19:25 — Pass 2 in place (investigation 9): what it can remove is 1.2–1.7%
+
+What an in-place pass 2 could save, priced before building it. The split squaring pairs lane l of
+row p at q with row p' at C−1−q, so pass 2 needs p and p' in the two lanes of a vector. In layout b
+a 16-byte load holds two adjacent columns of one row, so working in place means a load from each
+row and a transpose for every element, in every stage, instead of only at the first and last as
+now. The other form, adjacent columns in the lanes, makes the stride stages need a different
+twiddle per lane: twice the twiddle traffic, the cost that hurt on E cores before. Either way the
+only work it removes is the first and last stages' transposes; the scratch is the same 24 KB as
+the row pair it would replace, and the main-array loads and stores stay.
+
+Bound: the `_u4` row kernels without their transposes (64 `trn` per call each, wrong results),
+10 concurrent `kite time --iters 60000` on quiet eagle, ABBA, ms per squaring:
+
+| Test | FFT | Default | No transposes | Change |
+|---|---|--:|--:|--:|
+| 2009·2^3322280−1 | 240K | 1.2777, 1.2883 | 1.2669, 1.2688 | −1.2% |
+| 6767·2^3322174−1 | 256K | 1.3670, 1.3471 | 1.3360, 1.3325 | −1.7% |
+
+The default runs drifted 0.8% (240K) and 1.5% (256K) between A and A. So the most an in-place pass
+2 could remove is about 1–2%, before the transposes or per-lane twiddles it adds to the middle
+stages. The bound code was not committed.
+
+**Rule change (Andy).** The 3% bar for pursuing a step is gone: a step is dropped only if its bound
+is too small to detect, and when a gain sits near the noise the answer is more repeats, not a
+drop. Detectable means every run of one build beats every run of the other across ABBA repeats,
+or the means differ by more than twice the spread between repeats of one build. The 3% rule dated
+from 0.1.9, when kite was 8–15% behind PRST; the 0.1.15 register-offset change (+0.4–0.6%) and
+today's row unroll (+0.8–1.2%) had already been kept below it. Under the new rule #9 is open: its
+240K bound is detectable (every bound run beat every default run); its net gain is unknown.
+
+Blog material: price the part of a redesign that can actually go away, not the whole phase it
+touches. The 2026-10-21 bound removed all main-array traffic (4.5%) and made the redesign look
+like a few percent; asking what the new layout would still have to do left 1–2% at most.
