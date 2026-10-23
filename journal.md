@@ -2450,3 +2450,9 @@ closed in both forms. The one layout not ruled out pairs (row p, column q) with 
 q+1) in a vector, so the lanes are in different FFTs in both passes; it needs per-lane twiddles
 and leaves the rows a column apart at the stride-1 stage. Unexamined, and a redesign of both
 passes: research, not a next step.
+
+## 2026-10-23 20:30 — kite 0.1.16
+
+Release with the four-column-pair row kernels (`_u4`, 2026-10-23 18:55): 0.8–1.2% under load on
+eagle at 240K/256K. Nothing else changed in the engine since 0.1.15; the rest of the day's work
+(the list scheduler, the in-place pass 2 bounds) was measured and not kept.
