@@ -2456,3 +2456,21 @@ passes: research, not a next step.
 Release with the four-column-pair row kernels (`_u4`, 2026-10-23 18:55): 0.8–1.2% under load on
 eagle at 240K/256K. Nothing else changed in the engine since 0.1.15; the rest of the day's work
 (the list scheduler, the in-place pass 2 bounds) was measured and not kept.
+
+## 2026-11-10 20:10 — Possible options after 0.1.16
+
+With the kernel-level list closed (7, 8, 9) and one P core at about 95% of its FP-issue floor at
+240K (11.2M vector instructions per squaring over 4 pipes at 4.4 GHz is 0.64 ms against 0.665
+measured alone), the remaining room is under load and in fit to the fleet. Three approaches not
+on any earlier list, each with a bound to measure first, are in `docs/possible-options.md`:
+self-tuning the policy switches (t4, ntab, order) in-process on the member's chip; sharing the
+length-only tables between processes through a file-backed mapping, so the FP-cheaper table path
+stops costing E-cluster L2; and a speed-weighted thread split so a test can span P and E cores.
+
+The fleet today (production `client_revision`, darwin/arm64, seen in 14 days): 10 machines, 113
+cores, all on kite 0.1.16; 3 M2, 1 M4, 2 M4 Pro, 1 M4 Max, 1 M5 Pro and 2 reporting "Apple M6".
+Six of the ten, 63 of the cores, are chips every policy switch was never measured on, which is
+what puts self-tuning first.
+
+Blog material: an engine tuned to the floor on the machines its author owns, and a fleet that
+is mostly other machines; the policy crossovers are cache-shape questions, not code questions.
