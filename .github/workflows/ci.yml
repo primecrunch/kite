@@ -1,6 +1,6 @@
 name: ci
 
-# Build and test on GitHub's Apple Silicon runners (M1, macOS 14 and 15): an older chip and
+# Build and test on GitHub's Apple Silicon runners (macOS 15 and 26): an older chip and
 # older macOS than the M4 / macOS 27 machines kite is developed on. Correctness only; the
 # runners are virtualised, so timings mean nothing. The SME tests skip on M1 (no SME).
 on:
@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15]
+        os: [macos-15, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
