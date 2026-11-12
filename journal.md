@@ -2538,3 +2538,12 @@ the claimed x_n and the verifier's from squaring the certificate, so a wrong x_n
 0.1.16 with the PRST residue; its two cancelled jobs never started. So one observed case.
 
 Not released: no version bump, tag or embed yet.
+
+## 2026-11-12 21:15 — kite 0.1.17
+
+Release with the two Fermat correctness changes of today: a second Gerbicz failure in a row
+redoes the round at the next larger FFT length (5551·2^582247−1 gave error −3 in 0.1.16), and
+the tail after the last Gerbicz block is computed at two FFT lengths instead of twice at one.
+No change to speed outside the tail, which now costs one extra context and under B squarings
+at the longer length. CI moved from the retired macos-14 runner to macos-15 and macos-26, and
+the release build to macos-15.
