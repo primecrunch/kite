@@ -663,7 +663,19 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
         if (kite_max_roundoff(s.ctx) > res->maxerr) res->maxerr = kite_max_roundoff(s.ctx);
         // An unverified save from this round, or the one resumed from, may hold the error.
         if ((round_fail || failed) && o.checkpoint_unverified) remove(o.checkpoint_unverified);
-        if (round_fail) {
+        if (failed) {
+            res->gerbicz_errors++;
+            if (++consecutive_fail > 5) {
+                rc = -3;
+                goto out;
+            }
+            // Once is taken as a passing fault and redone as it was. Twice running is a squaring
+            // that is wrong every time, since the redo repeats the same arithmetic: a round-off
+            // error past 0.5 reads as its complement (0.625 as 0.375) and passes the limit, which
+            // is how 5551*2^582247-1 failed six times at 40960 and gave -3. So move up a length.
+            if (consecutive_fail < 2) continue;
+        }
+        if (round_fail || failed) {
             // redo from the verified state with the next larger FFT length
             uint32_t L = kite_fft_len(s.ctx);
             kite_opts fo = o.fft;
@@ -677,14 +689,6 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
             }
             power_start(&s, k, base, la);
             res->roundoff_retries++;
-            continue;
-        }
-        if (failed) {
-            res->gerbicz_errors++;
-            if (++consecutive_fail > 5) {
-                rc = -3;
-                goto out;
-            }
             continue;
         }
         consecutive_fail = 0;
@@ -706,56 +710,82 @@ int kite_prp(uint64_t k, uint64_t n, uint32_t base, const kite_prp_opts *opts,
         }
         if (vi >= full) break;
     }
-    // unprotected tail (< B squarings): compute twice and compare
+    // Tail (< B squarings), outside the Gerbicz check: computed at the test's FFT length and again
+    // at the next larger one, and the two compared. Two runs at one length repeat the same
+    // arithmetic, so a round-off error past 0.5, which reads as its complement and passes the
+    // limit (see the Gerbicz failure above), would be the same in both and compare equal. At a
+    // different length the round-off is a different draw, and smaller.
     {
-        uint64_t tail = n - full;
+        prp_state s2 = {0};
+        int fault = o.inject_fault_at > full;  // testing: corrupt the first run's tail once
         for (int attempt = 0;; attempt++) {
+            if (attempt > 0) {
+                // the runs differed, or one could not finish: both move up a length
+                if (attempt > 6) {
+                    state_free(&s2);
+                    rc = -3;
+                    goto out;
+                }
+                uint32_t L = kite_fft_len(s.ctx);
+                kite_opts fo = o.fft;
+                fo.fft_len = kite_next_fft_len(L + L / 25);
+                res->careful_ops += s.careful + s2.careful;
+                res->sum_errors += kite_sum_errors(s.ctx);
+                state_free(&s);
+                state_free(&s2);
+                if (!fo.fft_len || state_new(&s, k, n, fo, maxround)) {
+                    rc = -2;
+                    goto out;
+                }
+                power_start(&s, k, base, la);
+                res->roundoff_retries++;
+            }
+            {
+                uint32_t L = kite_fft_len(s.ctx);
+                kite_opts fo = o.fft;
+                fo.fft_len = kite_next_fft_len(L + L / 25);
+                if (!fo.fft_len || state_new(&s2, k, n, fo, maxround)) {
+                    state_free(&s2);
+                    rc = -2;
+                    goto out;
+                }
+            }
             kite_set_limbs(s.ctx, s.x, vx);
-            kite_set_limbs(s.ctx, s.t, vx);
+            kite_set_limbs(s2.ctx, s2.t, vx);
             // stop at each point in the tail so it can be reported
             uint64_t i = full;
             uint32_t pi = vp;
+            int over_limit = 0;
             pending_clear(&pend);
             while (i < n) {
                 uint64_t next = n;
                 if (o.on_point && pi < o.npoints && o.points[pi] > i && o.points[pi] < next) next = o.points[pi];
-                // checked like the blocks: two identical computations would repeat a round-off error
-                if (square_n_checked(&s, s.x, next - i) || square_n_checked(&s, s.t, next - i)) {
-                    uint32_t L = kite_fft_len(s.ctx);
-                    kite_opts fo = o.fft;
-                    fo.fft_len = kite_next_fft_len(L + L / 25);
-                    res->careful_ops += s.careful;
-        if (s.ctx) res->sum_errors += kite_sum_errors(s.ctx);
-                    state_free(&s);
-                    if (!fo.fft_len || state_new(&s, k, n, fo, maxround)) {
-                        rc = -2;
-                        goto out;
-                    }
-                    power_start(&s, k, base, la);
-                    res->roundoff_retries++;
-                    kite_set_limbs(s.ctx, s.x, vx);
-                    kite_set_limbs(s.ctx, s.t, vx);
-                    i = full;
-                    pi = vp;
-                    pending_clear(&pend);
-                    continue;
+                if (square_n_checked(&s, s.x, next - i)) {
+                    over_limit = 1;
+                    break;
                 }
                 i = next;
                 if (o.on_point && pi < o.npoints && o.points[pi] == i) pending_add(&pend, s.ctx, pi++, s.x);
             }
-            if (nums_equal(s.ctx, s.x, s.t, la, lb)) {
+            if (over_limit || square_n_checked(&s2, s2.t, n - full)) continue;
+            if (fault) {
+                kite_debug_corrupt(s.ctx, s.x);
+                fault = 0;
+            }
+            kite_get_limbs(s.ctx, s.x, la);
+            kite_get_limbs(s2.ctx, s2.t, lb);
+            if (!memcmp(la, lb, nl * 8)) {
                 if (pend.count && pending_flush(&pend, &o)) {
+                    state_free(&s2);
                     rc = KITE_PRP_POINT_FAILED;
                     goto out;
                 }
                 break;
             }
-            if (attempt > 5) {
-                rc = -3;
-                goto out;
-            }
             res->gerbicz_errors++;
         }
+        res->careful_ops += s2.careful;
+        state_free(&s2);
     }
     // la = x_n; PRP iff x_n == base^2; residue = x_n / base^2
     {

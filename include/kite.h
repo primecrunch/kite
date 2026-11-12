@@ -100,7 +100,9 @@ typedef struct {
     double unverified_secs;             // 0 = 60
     void (*progress)(void *arg, uint64_t iter, uint64_t n, double maxerr);
     void *progress_arg;
-    uint64_t inject_fault_at;  // testing: corrupt the state at this iteration (0 = never)
+    // testing: corrupt the state at this iteration (0 = never); one past the last Gerbicz block
+    // corrupts the first run of the tail instead
+    uint64_t inject_fault_at;
     // More careful redos than this in one Gerbicz round move the test to a longer FFT at the
     // next block boundary (0 = B*M/1100 + 8: their cost passing ~2% of the round).
     uint32_t careful_per_round;

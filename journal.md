@@ -2474,3 +2474,67 @@ what puts self-tuning first.
 
 Blog material: an engine tuned to the floor on the machines its author owns, and a fleet that
 is mostly other machines; the policy crossovers are cache-shape questions, not code questions.
+
+## 2026-11-12 18:35 — A wrong squaring the round-off check passes: 5551·2^582247−1 gave error −3
+
+A member reported 5551·2^582247−1 failing on three Apple Silicon machines (forum thread 103);
+PRST on x86 then finished it, composite, RES64 4C530CA729B28C65. It fails the same way on wolf
+with the released 0.1.16: the Gerbicz check of the round from 50% to 75% fails six times running
+and kite-prst exits with "test failed (error -3)". Deterministic, so not their hardware.
+
+The length chosen is 40960: 14.2150 bits per word against a fit of 14.2075, so 0.0075 past the
+fit and inside the +0.10 edge allowance. A harness squared 3^k at 40960 next to 46656, comparing
+the values every 64 squarings and recording the round-off 40960 reported for each one. Reported
+round-off over the whole test: 451,112 squarings in 0.25-0.30, 39,494 in 0.30-0.35, 1,388 in
+0.35-0.40, 56 in 0.40-0.45, one at 0.50. The reference never passed 0.07. Two blocks differed:
+
+- ending 220736 (37.9%): a squaring reporting 0.50. Over the 0.40 limit, so kite_prp redoes it
+  carefully and the test carries on.
+- ending 395456 (67.9%): the largest round-off reported in the block was 0.375, and the value
+  was wrong. The reported figure is the distance to the nearest integer, so a true error of
+  0.625 reads as 0.375 and passes.
+
+Gerbicz caught the second one, as it should. The redo then started from the verified state at
+the same length and repeated the same arithmetic, so it failed identically each time until the
+count of six ran out. `KITE_NO_TAN=1` made the test pass, which only shows how close it is: the
+standard twiddles round differently by enough to keep that one squaring under 0.5.
+
+Change in `kite_prp`: one Gerbicz failure is redone as before; a second in a row redoes the
+round from the verified state at the next larger FFT length, through the same code as a failed
+careful redo. With it the number finishes in 171.7 s with the PRST residue.
+
+Not changed, for Andy to decide:
+
+- The tail (fewer than B squarings after the last Gerbicz block) is computed twice and
+  compared. Both runs use the same length, so an error of this kind is the same in both and
+  the comparison passes. That is a wrong residue with nothing to flag it, unlike the −3 here.
+  Here B is about 763 of 582,247 squarings and one squaring in the whole test was of this kind.
+- The 0.40 limit only works while no true error passes 0.60. This number has a reported 0.50
+  and a true 0.625 at 0.0075 past the fit, so the fit at 40960 is generous for k near 5551, or
+  the tail of the error distribution is longer than the 2026-10-18 edge tests showed.
+
+Blog material: a round-off check measures distance to the nearest integer, and cannot tell
+0.375 from 0.625; an error check that retries the same deterministic arithmetic cannot recover
+from a deterministic error.
+
+## 2026-11-12 20:40 — The tail at two FFT lengths, and what the certificate covers
+
+Second change in `kite_prp` after the entry above. The tail (the squarings after the last
+Gerbicz block) was computed twice at one length and compared, which cannot see an error that
+is the same in both runs. It is now computed at the test's length and again at the next larger
+one, in a second context, and the two compared; a difference, or a round-off failure in
+either, moves both up a length. `inject_fault_at` past the last block corrupts the first run's
+tail, for the new ctest `tail_fault`. `gerbicz_repeat_longer_fft` (label long, 89 s) runs
+5551·2^582247−1 at 40960 and expects the PRST residue. ctest: 26 of 26 pass.
+
+Does a proof certificate catch a wrong tail? Tested, not reasoned: 0.1.16 in a worktree with a
+test-only fault putting the same wrong value in both tail runs, on 9357·2^200001−1 with the
+client's command lines. Control: test BDD48C45E17CDD83, builder and verifier both
+A55E6A55CB989990. Fault: test 1329E19B36D232D8 (wrong), builder 5B4440365C0B339C, verifier
+366B5BA3729F4F59, the same from kite and from PRST 14.0.1888. The builder's value comes from
+the claimed x_n and the verifier's from squaring the certificate, so a wrong x_n cannot match.
+
+3113·2^1488958−1, the only other candidate with repeated non-completed kite jobs, finishes on
+0.1.16 with the PRST residue; its two cancelled jobs never started. So one observed case.
+
+Not released: no version bump, tag or embed yet.

@@ -95,6 +95,12 @@ target_include_directories(test_llr PRIVATE src)
 target_link_libraries(test_llr kitelib)
 add_test(NAME llr_faults COMMAND test_llr)
 add_test(NAME gerbicz_fault COMMAND $<TARGET_FILE:kite> prp 1203 90001 --fault 50000 --expect 4BE9F1953E350085)
+# a fault in the tail, after the last Gerbicz block: the run at the second FFT length disagrees
+add_test(NAME tail_fault COMMAND $<TARGET_FILE:kite> prp 1203 90001 --fault 90001 --expect 4BE9F1953E350085)
+# one squaring at 67.9% is wrong at 40960 with a reported round-off of 0.375: the Gerbicz check
+# fails twice and the round is redone at a longer FFT (was error -3 in 0.1.16)
+add_test(NAME gerbicz_repeat_longer_fft COMMAND $<TARGET_FILE:kite> prp 5551 582247 --fft 40960 --expect 4C530CA729B28C65)
+set_tests_properties(gerbicz_repeat_longer_fft PROPERTIES LABELS long)
 
 add_executable(kbench tools/kbench.c)
 target_include_directories(kbench PRIVATE src)
